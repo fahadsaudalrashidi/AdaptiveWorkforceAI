@@ -1,0 +1,6 @@
+- [Imported dependency recovery](imported-dependencies.md) — compatible versions, mistaken external backend inference, minimal Nix scope, and release/editor isolation.
+- [Python in merge hooks](python-merge-hooks.md) — merge hooks do not inherit the editor's project-local pip destination; never install into Nix's system Python.
+- [Local analytics policy](local-analytics-policy.md) — Chat and Business Analyst must work without a paid AI API; keep calculations auditable and cloud processing opt-in.
+- [Local browser regression runtime](browser-regression-runtime.md) — use system Chromium with Python `websockets` for browser checks in this workspace.
+- [OCR numeric trust](pdf-ocr-trust.md) — OCR confidence does not verify figures or table alignment; mixed scans must not produce partial financial totals.
+- [Local extraction delivery](local-extraction-delivery.md) — live progress stays request-bound; durable/resumable jobs require an explicit shared-state design.

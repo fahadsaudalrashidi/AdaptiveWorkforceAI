@@ -1,0 +1,12 @@
+/attached_assets/
+/.agents/outputs/
+/generated-artifacts/
+/data/
+/.pytest_cache/
+# Editor dependency trees are excluded. Build installs a self-contained
+# .production-python prefix; do NOT exclude that generated release directory.
+/.pythonlibs/
+/executive-ui/node_modules/
+/.cache/
+/.npm/
+/.git/

@@ -1,0 +1,69 @@
+# Environment / secrets — never commit
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+/.production-python/
+
+# Node / frontend
+node_modules/
+executive-ui/dist/
+
+# Runtime data / logs / temp
+logs/
+sandbox_runs/
+data/uploads/
+data/outputs/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+SCREENSHOTS/
+pw_shots*/
+.claude/
+.vscode/
+catboost_info/
+data/
+config/
+scripts/
+*.xlsx
+*.json
+
+SCREENSHOTS/
+pw_shots*/
+.claude/
+.vscode/
+catboost_info/
+data/
+config/
+scripts/
+*.xlsx
+*.json
+
+SCREENSHOTS/
+pw_shots*/
+.claude/
+.vscode/
+catboost_info/
+data/
+config/
+scripts/
+*.xlsx
+*.json
+
+# Track runtime configuration source, but never .env or generated credentials.
+!/config/
+!/config/__init__.py
+!/config/settings.py
+
+# User uploads and generated inspection/browser output are not app assets.
+/attached_assets/
+/.agents/outputs/
+/generated-artifacts/

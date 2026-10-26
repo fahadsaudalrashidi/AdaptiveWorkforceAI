@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import io
+import unittest
+from unittest.mock import patch
+
+import pandas as pd
+
+from backend.core.ai_business_analyst_engine import answer_question
+from backend.core.excel_ingestion_engine import ExcelIngestionEngine
+from backend.core.local_question_engine import analyze_local_question
+
+
+def _simple_searchable_pdf(text: str | list[str]) -> bytes:
+    """Make a tiny valid PDF fixture without adding a PDF authoring dependency."""
+    lines = [text] if isinstance(text, str) else text
+    commands = ["BT /F1 12 Tf 72 720 Td"]
+    for line in lines:
+        escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        commands.append(f"({escaped}) Tj 0 -20 Td")
+    content = (" ".join(commands) + " ET").encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n".encode())
+        pdf.extend(body)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode())
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010} 00000 n \n".encode())
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode()
+    )
+    return bytes(pdf)
+
+
+class LocalFileAnalyticsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = ExcelIngestionEngine()
+
+    def test_nested_json_is_flattened_for_analysis(self) -> None:
+        raw = b'{"records":[{"department":"Sales","net":{"revenue":125}},{"department":"Ops","net":{"revenue":75}}]}'
+        result = self.engine.ingest(raw, "revenue.json")
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.row_count, 2)
+        self.assertIn("net.revenue", result.df.columns)
+
+    def test_workbook_returns_each_nonempty_sheet(self) -> None:
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        first = workbook.active
+        first.title = "North"
+        first.append(["Department", "Sales"])
+        first.append(["Retail", 10])
+        second = workbook.create_sheet("South")
+        second.append(["Department", "Sales"])
+        second.append(["Online", 20])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        result = self.engine.ingest_all(buffer.getvalue(), "regional.xlsx")
+        self.assertEqual([name for name, item in result if item.success], ["North", "South"])
+        self.assertEqual([item.df.iloc[0]["Sales"] for _, item in result], [10, 20])
+
+    def test_searchable_pdf_becomes_grounded_extractable_text(self) -> None:
+        result = self.engine.ingest(_simple_searchable_pdf("Contract renewal date is 2026-12-01."), "terms.pdf")
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.df.iloc[0]["PDF page"], 1)
+        answer = analyze_local_question("What does the contract say about renewal?", {"terms.pdf": result.df})
+        self.assertIsNotNone(answer)
+        self.assertEqual(answer.operation, "document_search")
+        self.assertIn("2026-12-01", answer.detail)
+
+    def test_grouped_sum_is_deterministic_and_integrated_in_chat_answer(self) -> None:
+        frame = pd.DataFrame({"Department": ["Retail", "Retail", "Online"], "Net Sales": [12.5, 7.5, 30.0]})
+        answer = answer_question("Show total net sales by department", {}, use_llm=False, uploaded_frames={"sales.csv": frame})
+        self.assertEqual(answer.mode, "tabular")
+        self.assertIn("Retail: 20.00", answer.key_evidence[0].value)
+        self.assertIn("Online: 30.00", answer.key_evidence[0].value)
+
+    def test_sensitive_column_is_not_used_even_when_other_numbers_exist(self) -> None:
+        frame = pd.DataFrame({"Salary": [100000, 120000], "Net Sales": [5, 8]})
+        answer = analyze_local_question("What is the total salary?", {"payroll.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+        self.assertIn("personal-data column", answer.text)
+        self.assertNotIn("220,000", answer.detail)
+
+    def test_ambiguous_measures_ask_for_clarification(self) -> None:
+        frame = pd.DataFrame({"Net Sales": [10, 20], "Gross Sales": [12, 22]})
+        answer = analyze_local_question("What is the total sales?", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+        self.assertIn("more than one numeric column", answer.text)
+
+    def test_count_works_without_a_numeric_column(self) -> None:
+        frame = pd.DataFrame({"Department": ["Retail", "Retail", "Online"]})
+        answer = analyze_local_question("Count records by department", {"teams.csv": frame})
+        self.assertEqual(answer.operation, "count_by")
+        self.assertIn("Retail: 2 rows", answer.detail)
+
+    def test_unknown_measure_does_not_substitute_the_only_numeric_column(self) -> None:
+        frame = pd.DataFrame({"Sales": [10, 20]})
+        answer = analyze_local_question("What is total profit?", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+
+    def test_unsupported_filter_never_returns_an_unfiltered_sum(self) -> None:
+        frame = pd.DataFrame({"Sales": [10, 20], "Department": ["Retail", "Online"]})
+        answer = analyze_local_question("Total sales only for Retail", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+
+    def test_governed_upload_preserves_json_and_pdf_formats(self) -> None:
+        from backend.api.local_analysis_routes import _ingest_analyst_upload
+
+        for filename, raw in [
+            ("revenue.json", b'[{"Revenue":125},{"Revenue":75}]'),
+            ("terms.pdf", _simple_searchable_pdf("Contract renewal is due in December.")),
+        ]:
+            frames, _, details = _ingest_analyst_upload(raw, filename)
+            self.assertTrue(frames, details)
+            self.assertFalse(any(detail.get("error") for detail in details), details)
+
+    def test_borderless_pdf_table_can_be_calculated_locally(self) -> None:
+        raw = _simple_searchable_pdf([
+            "Department      Sales",
+            "Retail          12.5",
+            "Online          30.0",
+            "Retail          7.5",
+        ])
+        result = self.engine.ingest(raw, "sales.pdf")
+        self.assertTrue(result.success, result.error)
+        self.assertIn("Sales", result.df.columns)
+        answer = analyze_local_question("Total Sales", {"sales.pdf": result.df})
+        self.assertIn("50.00", answer.detail)
+
+    def test_json_collections_remain_separate_sources(self) -> None:
+        from backend.api.local_analysis_routes import _ingest_analyst_upload
+
+        raw = b'{"north":[{"Sales":10}],"south":[{"Sales":20}]}'
+        frames, _, details = _ingest_analyst_upload(raw, "regions.json")
+        self.assertEqual(len(frames), 2, details)
+        answer = analyze_local_question("Total Sales", frames)
+        self.assertEqual(answer.operation, "clarify")
+        answer = analyze_local_question("Total Sales in north", frames)
+        self.assertIn("10.00", answer.detail)
+
+    def test_workbook_limit_is_explicit_not_a_silent_single_sheet_fallback(self) -> None:
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        for index in range(50):
+            workbook.create_sheet(f"Extra {index}")
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        result = self.engine.ingest_all(buffer.getvalue(), "large.xlsx")
+        self.assertFalse(result[0][1].success)
+        self.assertIn("more than 50", result[0][1].error)
+
+    def test_pdf_table_upload_retains_document_text(self) -> None:
+        from backend.api.local_analysis_routes import _ingest_analyst_upload
+
+        raw = _simple_searchable_pdf([
+            "Department      Sales", "Retail          12.5",
+            "Online          30.0", "Retail          7.5",
+        ])
+        frames, _, details = _ingest_analyst_upload(raw, "sales.pdf")
+        self.assertEqual(len(frames), 2, details)
+        answer = analyze_local_question("Summarize this document", frames)
+        self.assertEqual(answer.operation, "document_search")
+        self.assertIn("Retail", answer.detail)
+
+    def test_chat_api_defaults_local_even_when_cloud_is_configured(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from backend.api.local_analysis_routes import create_local_analysis_router
+        from backend.core.auth_session import AWIRole
+        from backend.core.cloud_llm_client import CloudModeStatus
+        from backend.core.local_auth import LocalUser
+        from backend.core.security_middleware import get_current_user
+
+        app = FastAPI()
+        app.include_router(create_local_analysis_router())
+        user = LocalUser("test-user", "test", "Test", "", AWIRole.SYSTEM_ADMIN, must_change_pw=False)
+        app.dependency_overrides[get_current_user] = lambda: user
+        configured = CloudModeStatus(True, False, "Explicit opt-in required", "(test)", "test-model")
+        with (
+            patch("backend.api.local_analysis_routes._agentic_check_cloud_mode", side_effect=AssertionError("Cloud must not be contacted")),
+            patch("backend.api.local_analysis_routes._agentic_cloud_mode_configuration", return_value=configured),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                "/api/local/ai-business-analyst/agentic",
+                data={"question": "Total Net Sales by Department"},
+                files={"files": ("sales.csv", b"Department,Net Sales\nRetail,12.5\nRetail,7.5\nOnline,30\n", "text/csv")},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["mode"], "local_fallback")
+        self.assertEqual(body["answer"]["mode"], "tabular")
+        self.assertIn("Retail: 20.00", body["answer"]["key_evidence"][0]["value"])
+        self.assertEqual(body["file_details"][0]["rows"], 3)
+
+    def test_chat_api_keeps_authentication_required(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from backend.api.local_analysis_routes import create_local_analysis_router
+
+        app = FastAPI()
+        app.include_router(create_local_analysis_router())
+        with TestClient(app) as client:
+            response = client.post("/api/local/ai-business-analyst/agentic", data={"question": "Total Sales"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_semicolon_csv_and_decimal_comma_values(self) -> None:
+        result = self.engine.ingest(b"Department;Sales\nRetail;12,50\nOnline;30,00\n", "sales.csv")
+        self.assertTrue(result.success, result.error)
+        answer = analyze_local_question("Total Sales", {"sales.csv": result.df})
+        self.assertIn("42.50", answer.detail)
+
+    def test_category_filter_is_not_ignored(self) -> None:
+        frame = pd.DataFrame({"Department": ["Retail", "Online"], "Sales": [10, 20]})
+        answer = analyze_local_question("Total Sales for Retail", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+        self.assertTrue(answer.priority)
+
+    def test_ambiguous_day_month_dates_require_iso_format(self) -> None:
+        frame = pd.DataFrame({"Date": ["01/02/2026", "02/03/2026"], "Sales": [10, 20]})
+        answer = analyze_local_question("Sales trend over time", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+        self.assertIn("YYYY-MM-DD", answer.text)
+
+    def test_empty_image_only_pdf_has_an_explicit_extraction_error(self) -> None:
+        result = self.engine.ingest(_simple_searchable_pdf(""), "scan.pdf")
+        self.assertFalse(result.success)
+        self.assertIn("OCR", result.error)
+
+
+if __name__ == "__main__":
+    unittest.main()
