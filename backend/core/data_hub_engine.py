@@ -532,6 +532,203 @@ def forecast_frame(
     }
 
 
+def workforce_scenario_frame(
+    frame: pd.DataFrame,
+    *,
+    filename: str,
+    sheet: str,
+    department_column: str,
+    headcount_column: str,
+    payroll_column: str,
+    overtime_column: str | None,
+    scenarios: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Run transparent what-if calculations and return aggregates only."""
+    if frame.empty:
+        raise ValueError("The selected worksheet has no data rows.")
+    if not scenarios or len(scenarios) > 3:
+        raise ValueError("Provide one to three scenarios.")
+    if department_column and department_column not in frame.columns:
+        raise ValueError("Choose a department or workforce-group column in the selected worksheet.")
+    for column in (payroll_column,):
+        if column not in frame.columns:
+            raise ValueError("Choose a payroll measure present in the selected worksheet.")
+    if headcount_column != "__rows__" and headcount_column not in frame.columns:
+        raise ValueError("Choose a headcount measure present in the selected worksheet.")
+    if overtime_column and overtime_column not in frame.columns:
+        raise ValueError("Choose an overtime measure present in the selected worksheet.")
+    if len(set(map(str, frame.columns))) != len(frame.columns):
+        raise ValueError("Duplicate column names must be resolved before scenario modeling.")
+    measure_columns = [
+        column for column in (headcount_column, payroll_column, overtime_column)
+        if column and column != "__rows__"
+    ]
+    if len(set(measure_columns)) != len(measure_columns):
+        raise ValueError("Choose separate headcount, payroll, and overtime measures.")
+
+    scanner = SecureFileIngestion()
+    selected_columns = [payroll_column]
+    if department_column:
+        selected_columns.append(department_column)
+    if headcount_column != "__rows__":
+        selected_columns.append(headcount_column)
+    if overtime_column:
+        selected_columns.append(overtime_column)
+    for column in selected_columns:
+        sensitive, _ = _sensitivity(column, scanner)
+        if sensitive:
+            raise ValueError("Scenario modeling is disabled for columns identified as personal or post-event data.")
+
+    if department_column and department_column in {payroll_column, headcount_column, overtime_column}:
+        raise ValueError("Choose separate department, headcount, payroll, and overtime columns.")
+
+    departments = (
+        frame[department_column].astype("string").str.strip()
+        if department_column
+        else pd.Series("All workforce", index=frame.index, dtype="string")
+    )
+    headcount = (
+        pd.Series(1.0, index=frame.index, dtype="float64")
+        if headcount_column == "__rows__"
+        else _clean_numeric(frame[headcount_column])
+    )
+    payroll = _clean_numeric(frame[payroll_column])
+    overtime = (
+        _clean_numeric(frame[overtime_column])
+        if overtime_column
+        else pd.Series(0.0, index=frame.index, dtype="float64")
+    )
+    valid = departments.notna() & departments.ne("") & headcount.notna() & payroll.notna() & overtime.notna()
+    if not valid.any():
+        raise ValueError("No rows contain a valid workforce group, headcount, and payroll measure.")
+    if (headcount[valid] < 0).any() or (payroll[valid] < 0).any() or (overtime[valid] < 0).any():
+        raise ValueError("Headcount and cost measures must be non-negative for scenario modeling.")
+
+    data = pd.DataFrame({
+        "department": departments[valid].astype(str).str.slice(0, _SAFE_LABEL_LIMIT),
+        "headcount": headcount[valid].astype(float),
+        "payroll": payroll[valid].astype(float),
+        "overtime": overtime[valid].astype(float),
+    })
+    if data["department"].nunique(dropna=True) > 500:
+        raise ValueError("The selected workforce group column has too many distinct values to model safely.")
+    grouped = data.groupby("department", sort=True, dropna=True).sum(numeric_only=True)
+    if grouped.empty or grouped["headcount"].sum() <= 0:
+        raise ValueError("A positive headcount total is required for scenario modeling.")
+
+    def totals_for(group_values: pd.DataFrame) -> dict[str, float | None]:
+        payroll_total = float(group_values["payroll"].sum())
+        overtime_total = float(group_values["overtime"].sum()) if overtime_column else None
+        return {
+            "headcount": _finite(group_values["headcount"].sum()) or 0.0,
+            "payroll": _finite(payroll_total) or 0.0,
+            "overtime": _finite(overtime_total) if overtime_total is not None else None,
+            "labor_cost": _finite(payroll_total + (overtime_total or 0.0)) or 0.0,
+        }
+
+    def public_groups(group_values: pd.DataFrame, withheld: bool) -> list[dict[str, Any]]:
+        if withheld or not department_column:
+            return []
+        result: list[dict[str, Any]] = []
+        for label, row in group_values.iterrows():
+            payroll_value = float(row["payroll"])
+            overtime_value = float(row["overtime"]) if overtime_column else None
+            result.append({
+                "label": str(label)[:_SAFE_LABEL_LIMIT],
+                "headcount": _finite(row["headcount"]) or 0.0,
+                "payroll": _finite(payroll_value) or 0.0,
+                "overtime": _finite(overtime_value) if overtime_value is not None else None,
+                "labor_cost": _finite(payroll_value + (overtime_value or 0.0)) or 0.0,
+            })
+        return result
+
+    withheld_groups = bool(department_column and (grouped["headcount"] < 5).any())
+    baseline_totals = totals_for(grouped)
+    baseline = {
+        **baseline_totals,
+        "groups": public_groups(grouped, withheld_groups),
+        "group_details_withheld": withheld_groups,
+    }
+
+    scenarios_result: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, scenario in enumerate(scenarios, start=1):
+        if not isinstance(scenario, dict):
+            raise ValueError("Each scenario must be an object.")
+        scenario_id = str(scenario.get("id", f"scenario-{index}"))[:40]
+        name = str(scenario.get("name", f"Scenario {index}")).strip()[:60]
+        if not scenario_id or scenario_id in seen_ids or not name:
+            raise ValueError("Scenario names and IDs must be non-empty and IDs must be unique.")
+        seen_ids.add(scenario_id)
+        try:
+            headcount_change = float(scenario["headcount_change_pct"])
+            payroll_growth = float(scenario["payroll_growth_pct"])
+            overtime_reduction = float(scenario["overtime_reduction_pct"])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Each scenario must include valid headcount, payroll, and overtime assumptions.") from exc
+        if not all(np.isfinite(value) for value in (headcount_change, payroll_growth, overtime_reduction)):
+            raise ValueError("Scenario assumptions must be finite numbers.")
+        if not -100 <= headcount_change <= 200:
+            raise ValueError("Headcount change must be between -100% and 200%.")
+        if not -100 <= payroll_growth <= 200:
+            raise ValueError("Payroll growth must be between -100% and 200%.")
+        if not -100 <= overtime_reduction <= 100:
+            raise ValueError("Overtime reduction must be between -100% and 100%.")
+
+        headcount_factor = 1 + headcount_change / 100
+        payroll_factor = 1 + payroll_growth / 100
+        overtime_factor = 1 - overtime_reduction / 100
+        projected = grouped.copy()
+        projected["headcount"] *= headcount_factor
+        projected["payroll"] *= headcount_factor * payroll_factor
+        projected["overtime"] *= headcount_factor * overtime_factor
+        totals = totals_for(projected)
+        scenarios_result.append({
+            "id": scenario_id,
+            "name": name,
+            "assumptions": {
+                "headcount_change_pct": _finite(headcount_change),
+                "payroll_growth_pct": _finite(payroll_growth),
+                "overtime_reduction_pct": _finite(overtime_reduction),
+            },
+            "totals": totals,
+            "groups": public_groups(projected, withheld_groups),
+            "group_details_withheld": withheld_groups,
+        })
+
+    excluded_rows = int(len(frame) - int(valid.sum()))
+    limitations = [
+        "These are deterministic what-if calculations, not predictive forecasts; the supplied percentages are planning assumptions.",
+        "Headcount changes are applied proportionally across groups. Payroll is scaled by the headcount factor and the separate payroll-growth assumption.",
+        "Overtime is scaled by projected headcount and the separate overtime-reduction assumption.",
+        "This calculation does not infer labor-law or Saudization requirements and is not compliance advice.",
+    ]
+    if withheld_groups:
+        limitations.append(
+            "Department-level details are withheld because at least one group has fewer than five people; overall totals still include all valid groups."
+        )
+
+    return {
+        "filename": Path(filename).name[:_SAFE_LABEL_LIMIT],
+        "sheet": str(sheet)[:_SAFE_LABEL_LIMIT],
+        "department_column": department_column[:_SAFE_LABEL_LIMIT],
+        "headcount_column": headcount_column,
+        "payroll_column": payroll_column[:_SAFE_LABEL_LIMIT],
+        "overtime_column": overtime_column[:_SAFE_LABEL_LIMIT] if overtime_column else None,
+        "source_rows": int(len(frame)),
+        "analyzed_rows": int(valid.sum()),
+        "excluded_rows": excluded_rows,
+        "baseline": baseline,
+        "scenarios": scenarios_result,
+        "limitations": limitations,
+        "privacy": {
+            "mode": "request_scoped_local_processing",
+            "persisted": False,
+            "source_rows_returned": False,
+        },
+    }
+
+
 def build_summary_xlsx(profiles: list[dict[str, Any]]) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill

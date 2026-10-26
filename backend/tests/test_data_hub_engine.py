@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import unittest
 from datetime import timedelta
 
@@ -17,6 +18,7 @@ from backend.core.data_hub_engine import (
     _clean_numeric,
     forecast_frame,
     profile_frame,
+    workforce_scenario_frame,
 )
 
 
@@ -207,6 +209,142 @@ class DataHubProfileTests(unittest.TestCase):
             files=[("files", ("budget.csv", b"Month,Cost\n2025-01,10\n", "text/csv"))],
         )
         self.assertEqual(response.status_code, 401)
+
+
+class WorkforceScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.frame = pd.DataFrame({
+            "Department": ["Operations", "Finance"],
+            "Headcount": [10, 5],
+            "Annual Payroll": [100_000, 50_000],
+            "Overtime Cost": [5_000, 2_500],
+        })
+        self.scenarios = [{
+            "id": "growth",
+            "name": "Growth",
+            "headcount_change_pct": 10,
+            "payroll_growth_pct": 5,
+            "overtime_reduction_pct": 20,
+        }]
+
+    def build(self, frame=None, scenarios=None):
+        return workforce_scenario_frame(
+            frame if frame is not None else self.frame,
+            filename="workforce.csv",
+            sheet="Data",
+            department_column="Department",
+            headcount_column="Headcount",
+            payroll_column="Annual Payroll",
+            overtime_column="Overtime Cost",
+            scenarios=scenarios if scenarios is not None else self.scenarios,
+        )
+
+    def test_scenarios_compare_workforce_and_cost_with_explicit_assumptions(self):
+        result = self.build()
+        self.assertEqual(result["baseline"]["headcount"], 15)
+        self.assertEqual(result["baseline"]["labor_cost"], 157500)
+        self.assertEqual(result["scenarios"][0]["totals"]["headcount"], 16.5)
+        self.assertEqual(result["scenarios"][0]["totals"]["payroll"], 173250)
+        self.assertEqual(result["scenarios"][0]["totals"]["overtime"], 6600)
+        self.assertEqual(result["scenarios"][0]["totals"]["labor_cost"], 179850)
+        self.assertEqual(len(result["baseline"]["groups"]), 2)
+        self.assertFalse(result["privacy"]["persisted"])
+        self.assertFalse(result["privacy"]["source_rows_returned"])
+
+    def test_small_department_details_are_withheld(self):
+        result = self.build(frame=pd.DataFrame({
+            "Department": ["Operations", "Finance"],
+            "Headcount": [10, 4],
+            "Annual Payroll": [100_000, 40_000],
+            "Overtime Cost": [5_000, 2_000],
+        }))
+        self.assertTrue(result["baseline"]["group_details_withheld"])
+        self.assertEqual(result["baseline"]["groups"], [])
+        self.assertEqual(result["baseline"]["headcount"], 14)
+        self.assertTrue(any("fewer than five" in item for item in result["limitations"]))
+
+    def test_totals_only_comparison_does_not_require_a_department_dimension(self):
+        result = workforce_scenario_frame(
+            self.frame,
+            filename="workforce.csv",
+            sheet="Data",
+            department_column="",
+            headcount_column="Headcount",
+            payroll_column="Annual Payroll",
+            overtime_column=None,
+            scenarios=self.scenarios,
+        )
+        self.assertEqual(result["baseline"]["headcount"], 15)
+        self.assertEqual(result["baseline"]["labor_cost"], 150000)
+        self.assertEqual(result["baseline"]["groups"], [])
+        self.assertFalse(result["baseline"]["group_details_withheld"])
+
+    def test_sensitive_columns_and_out_of_range_assumptions_are_rejected(self):
+        sensitive = self.frame.assign(Salary=[10_000, 10_000])
+        with self.assertRaisesRegex(ValueError, "personal or post-event"):
+            workforce_scenario_frame(
+                sensitive,
+                filename="workforce.csv",
+                sheet="Data",
+                department_column="Department",
+                headcount_column="Headcount",
+                payroll_column="Salary",
+                overtime_column=None,
+                scenarios=self.scenarios,
+            )
+        invalid = [{**self.scenarios[0], "headcount_change_pct": 201}]
+        with self.assertRaisesRegex(ValueError, "between -100% and 200%"):
+            self.build(scenarios=invalid)
+
+    def test_negative_costs_are_rejected(self):
+        invalid = self.frame.copy()
+        invalid.loc[0, "Annual Payroll"] = -1
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            self.build(frame=invalid)
+
+    def test_scenario_endpoint_returns_aggregates_and_requires_authentication(self):
+        router = create_data_hub_router()
+        app = FastAPI()
+        app.dependency_overrides[router.dependencies[0].dependency] = lambda: None
+        app.include_router(router)
+        client = TestClient(app)
+        csv = (
+            "Department,Headcount,Annual Payroll,Overtime Cost\n"
+            "Operations,10,100000,5000\n"
+            "Finance,5,50000,2500\n"
+        ).encode()
+        response = client.post(
+            "/api/local/data-hub/scenario",
+            files={"file": ("workforce.csv", csv, "text/csv")},
+            data={
+                "sheet": "Data",
+                "department_column": "Department",
+                "headcount_column": "Headcount",
+                "payroll_column": "Annual Payroll",
+                "overtime_column": "Overtime Cost",
+                "scenarios": json.dumps(self.scenarios),
+                "language": "en",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["baseline"]["headcount"], 15)
+        self.assertFalse(payload["privacy"]["persisted"])
+        self.assertNotIn("Operations,10", response.text)
+
+        protected = FastAPI()
+        protected.include_router(create_data_hub_router())
+        unauthorized = TestClient(protected).post(
+            "/api/local/data-hub/scenario",
+            files={"file": ("workforce.csv", csv, "text/csv")},
+            data={
+                "department_column": "Department",
+                "headcount_column": "Headcount",
+                "payroll_column": "Annual Payroll",
+                "scenarios": json.dumps(self.scenarios),
+            },
+        )
+        self.assertEqual(unauthorized.status_code, 401)
 
 
 if __name__ == "__main__":

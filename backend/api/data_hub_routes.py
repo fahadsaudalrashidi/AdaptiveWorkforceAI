@@ -20,10 +20,12 @@ from backend.core.data_hub_engine import (
     MAX_FILE_BYTES,
     MAX_REQUEST_BYTES,
     SUPPORTED_DATA_HUB_EXTENSIONS,
+    apply_cleaning,
     build_summary_pdf,
     build_summary_xlsx,
     forecast_frame,
     profile_upload,
+    workforce_scenario_frame,
 )
 from backend.core.excel_ingestion_engine import ExcelIngestionEngine
 from backend.core.security_middleware import require_permission
@@ -49,6 +51,17 @@ def create_data_hub_router() -> APIRouter:
         if unknown:
             raise HTTPException(status_code=422, detail=f"Unsupported cleaning option(s): {', '.join(sorted(unknown))}.")
         return list(dict.fromkeys(options))
+
+    def parse_scenarios(value: str) -> list[dict[str, Any]]:
+        try:
+            scenarios = json.loads(value or "[]")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail="scenarios must be a JSON array.") from exc
+        if not isinstance(scenarios, list) or any(not isinstance(item, dict) for item in scenarios):
+            raise HTTPException(status_code=422, detail="scenarios must be a JSON array of scenario objects.")
+        if not 1 <= len(scenarios) <= 3:
+            raise HTTPException(status_code=422, detail="Provide one to three scenarios.")
+        return scenarios
 
     async def read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
         if not files:
@@ -186,6 +199,76 @@ def create_data_hub_router() -> APIRouter:
         except Exception:
             logger.exception("Data Hub trend projection failed for %s", filename)
             raise HTTPException(status_code=422, detail="The selected data could not produce a valid monthly trend.")
+
+    @router.post("/scenario")
+    async def scenario_data(
+        file: UploadFile = File(...),
+        sheet: str = Form(""),
+        department_column: str = Form(...),
+        headcount_column: str = Form("__rows__"),
+        payroll_column: str = Form(...),
+        overtime_column: str = Form(""),
+        cleaning_options: str = Form("[]"),
+        scenarios: str = Form(...),
+        language: str = Form("en"),
+    ) -> dict[str, Any]:
+        """Compare local, assumption-driven workforce scenarios; return aggregates only."""
+        filename = Path(file.filename or "upload.dat").name
+        if Path(filename).suffix.lower() not in SUPPORTED_DATA_HUB_EXTENSIONS:
+            raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, or JSON.")
+        raw = await file.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="Each file must be 25 MB or smaller.")
+        if not raw:
+            raise HTTPException(status_code=422, detail="The uploaded file is empty.")
+        if language not in {"en", "ar"}:
+            raise HTTPException(status_code=422, detail="language must be 'en' or 'ar'.")
+        options = parse_cleaning_options(cleaning_options)
+        scenario_inputs = parse_scenarios(scenarios)
+
+        def build() -> dict[str, Any]:
+            results = ExcelIngestionEngine().ingest_all(raw, filename)
+            selected = next(
+                (
+                    result for name, result in results
+                    if result.success and result.df is not None and (not sheet or name == sheet)
+                ),
+                None,
+            )
+            if selected is None or selected.df is None:
+                raise ValueError("The selected worksheet could not be found or read.")
+            cleaned, _, _ = apply_cleaning(selected.df, options)
+            response = workforce_scenario_frame(
+                cleaned,
+                filename=filename,
+                sheet=selected.sheet_used or sheet or "Data",
+                department_column=department_column,
+                headcount_column=headcount_column,
+                payroll_column=payroll_column,
+                overtime_column=overtime_column or None,
+                scenarios=scenario_inputs,
+            )
+            if language == "ar":
+                response["limitations"] = [
+                    "هذه حسابات افتراضية حتمية وليست توقعات؛ النسب المدخلة افتراضات تخطيطية.",
+                    "تُطبّق تغييرات عدد الموظفين بالتناسب على المجموعات، ثم تُطبّق نسبة نمو الرواتب بشكل منفصل.",
+                    "تُعدّل تكلفة العمل الإضافي وفق عدد الموظفين المتوقع ونسبة خفض العمل الإضافي.",
+                    "لا تستنتج هذه الحسابات متطلبات نظام العمل أو التوطين، وليست استشارة امتثال.",
+                    *(
+                        ["تم إخفاء تفاصيل الإدارات لوجود مجموعة يقل عدد أفرادها عن خمسة؛ وتظل المجاميع العامة شاملة لجميع المجموعات الصالحة."]
+                        if response["baseline"]["group_details_withheld"]
+                        else []
+                    ),
+                ]
+            return response
+
+        try:
+            return await asyncio.to_thread(build)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            logger.exception("Data Hub workforce scenario failed for %s", filename)
+            raise HTTPException(status_code=422, detail="The selected data could not produce a valid scenario comparison.")
 
     async def export_profiles(
         files: list[UploadFile],

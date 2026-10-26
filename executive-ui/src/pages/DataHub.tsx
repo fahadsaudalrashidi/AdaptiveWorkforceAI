@@ -10,6 +10,7 @@ import {
 } from 'recharts'
 import { useLanguage } from '../context/LanguageContext'
 import { requestLocalAnalysis, type ExtractionProgress } from '../components/analytics/analysisStream'
+import { WorkforceScenarioStudio } from '../components/dataHub/WorkforceScenarioStudio'
 
 type CleaningId = 'trim_text' | 'remove_blank_rows' | 'remove_blank_columns' | 'remove_exact_duplicates'
 interface ColumnProfile {
@@ -90,6 +91,7 @@ export function DataHub() {
   const [horizon, setHorizon] = useState(3)
   const [forecast, setForecast] = useState<ForecastResponse | null>(null)
   const [forecastBusy, setForecastBusy] = useState(false)
+  const [scenarioBusy, setScenarioBusy] = useState(false)
   const [question, setQuestion] = useState('')
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [chatBusy, setChatBusy] = useState(false)
@@ -138,7 +140,7 @@ export function DataHub() {
   }, [forecast])
 
   const addFiles = (incoming: File[]) => {
-    if (busy || forecastBusy || chatBusy) return
+    if (busy || forecastBusy || scenarioBusy || chatBusy) return
     const issues: string[] = []
     const next = [...files]
     const accepted = incoming.filter((file) => ACCEPTED.test(file.name))
@@ -164,10 +166,10 @@ export function DataHub() {
   }
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault(); setDragging(false)
-    if (!busy && !forecastBusy && !chatBusy) addFiles(Array.from(event.dataTransfer.files))
+    if (!busy && !forecastBusy && !scenarioBusy && !chatBusy) addFiles(Array.from(event.dataTransfer.files))
   }
   const removeFile = (index: number) => {
-    if (busy || forecastBusy || chatBusy) return
+    if (busy || forecastBusy || scenarioBusy || chatBusy) return
     setFiles((current) => current.filter((_, i) => i !== index)); setInspection(null); setForecast(null); setTurns([])
   }
   const toggleCleaning = (id: CleaningId) => {
@@ -182,7 +184,7 @@ export function DataHub() {
     return form
   }
   const inspect = async () => {
-    if (!files.length || busy) return
+    if (!files.length || busy || forecastBusy || scenarioBusy || chatBusy) return
     setBusy('inspect'); setError(''); setInspection(null); setForecast(null)
     try {
       const response = await fetch('/api/local/data-hub/inspect', { method: 'POST', body: buildInspectForm() })
@@ -203,7 +205,7 @@ export function DataHub() {
     } finally { setBusy(null) }
   }
   const download = async (kind: 'xlsx' | 'pdf') => {
-    if (!files.length || busy) return
+    if (!files.length || busy || forecastBusy || scenarioBusy || chatBusy) return
     setBusy(kind === 'xlsx' ? 'export-xlsx' : 'export-pdf'); setError('')
     try {
       const form = buildInspectForm()
@@ -227,7 +229,7 @@ export function DataHub() {
   }
   const runForecast = async (event: FormEvent) => {
     event.preventDefault()
-    if (!activeForecastDataset || !forecastDate || !forecastMetric || forecastBusy) return
+    if (!activeForecastDataset || !forecastDate || !forecastMetric || busy || forecastBusy || scenarioBusy || chatBusy) return
     setForecastBusy(true); setError(''); setForecast(null)
     try {
       const form = new FormData()
@@ -247,7 +249,7 @@ export function DataHub() {
   const askLocal = async (event: FormEvent) => {
     event.preventDefault()
     const trimmed = question.trim()
-    if (!trimmed || !files.length || chatBusy) return
+    if (!trimmed || !files.length || busy || forecastBusy || chatBusy || scenarioBusy) return
     setQuestion(''); setChatBusy(true); setExtractionProgress({ stage: 'starting' })
     const turnIndex = turns.length
     setTurns((current) => [...current, { question: trimmed, loading: true }])
@@ -322,9 +324,9 @@ export function DataHub() {
         <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div><h2 id="upload-heading" className="flex items-center gap-2 text-base font-semibold"><Database size={17} className="text-[#72c6a3]" />{t('Source files', 'ملفات المصدر')}</h2>
             <p className="mt-1 text-xs text-slate-400">{t('CSV, XLS, XLSX or JSON · 25 MB each · 50 MB total · up to 10 files', 'CSV أو XLS أو XLSX أو JSON · 25 م.ب لكل ملف · 50 م.ب إجمالاً · حتى 10 ملفات')}</p></div>
-          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy !== null || forecastBusy || chatBusy} className="btn-ghost min-h-9 border border-slate-700/80"><Plus size={15} />{t('Choose files', 'اختيار الملفات')}</button>
+          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} className="btn-ghost min-h-9 border border-slate-700/80"><Plus size={15} />{t('Choose files', 'اختيار الملفات')}</button>
         </div>
-        <input ref={inputRef} className="sr-only" type="file" multiple accept=".csv,.xls,.xlsx,.json" aria-label={t('Choose data files', 'اختيار ملفات البيانات')} onChange={onFileChange} disabled={busy !== null || forecastBusy || chatBusy} />
+        <input ref={inputRef} className="sr-only" type="file" multiple accept=".csv,.xls,.xlsx,.json" aria-label={t('Choose data files', 'اختيار ملفات البيانات')} onChange={onFileChange} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} />
         <div
           role="button" tabIndex={0} aria-label={t('Drop files here or press Enter to choose files', 'أسقط الملفات هنا أو اضغط إدخال لاختيار الملفات')}
           onClick={() => inputRef.current?.click()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); inputRef.current?.click() } }}
@@ -338,18 +340,18 @@ export function DataHub() {
         </div>
         {files.length > 0 && <div className="mt-3 space-y-2">{files.map((file, index) => <div key={`${file.name}-${file.lastModified}-${index}`} className="flex items-center gap-3 rounded-xl border border-slate-700/70 bg-[#171a34]/60 px-3 py-2.5">
           <FileSpreadsheet size={16} className="shrink-0 text-[#72c6a3]" /><span className="min-w-0 flex-1 truncate text-sm text-slate-200">{file.name}</span><span className="text-xs tabular-nums text-slate-500">{bytes(file.size, isAr)}</span>
-          <button type="button" onClick={() => removeFile(index)} disabled={busy !== null || forecastBusy || chatBusy} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-700 hover:text-white disabled:opacity-40" aria-label={t(`Remove ${file.name}`, `إزالة ${file.name}`)}><X size={15} /></button>
+          <button type="button" onClick={() => removeFile(index)} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-700 hover:text-white disabled:opacity-40" aria-label={t(`Remove ${file.name}`, `إزالة ${file.name}`)}><X size={15} /></button>
         </div>)}</div>}
         <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
           <div>
             <div className="mb-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">{t('Optional in-memory cleaning', 'تنظيف اختياري في الذاكرة')}</div>
             <div className="flex flex-wrap gap-x-4 gap-y-2">{CLEANING.map((option) => <label key={option.id} className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-300">
-              <input type="checkbox" className="h-3.5 w-3.5 accent-[#72c6a3]" checked={cleaning.includes(option.id)} onChange={() => toggleCleaning(option.id)} disabled={busy !== null || forecastBusy || chatBusy} />
+              <input type="checkbox" className="h-3.5 w-3.5 accent-[#72c6a3]" checked={cleaning.includes(option.id)} onChange={() => toggleCleaning(option.id)} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} />
               <span>{t(option.en, option.ar)} <span className="text-slate-500">· {t(option.noteEn, option.noteAr)}</span></span>
             </label>)}</div>
             <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-5 text-slate-500"><CircleHelp size={13} className="mt-0.5 shrink-0" />{t('Selected transformations apply only to a re-analyzed in-memory copy. Original files are unchanged.', 'تُطبّق التحويلات المحددة على نسخة داخل الذاكرة يعاد تحليلها فقط. لا تتغير الملفات الأصلية.')}</p>
           </div>
-          <button type="button" onClick={() => void inspect()} disabled={!files.length || busy !== null} className={`${primaryButton} w-full lg:w-auto`}>
+          <button type="button" onClick={() => void inspect()} disabled={!files.length || busy !== null || forecastBusy || scenarioBusy || chatBusy} className={`${primaryButton} w-full lg:w-auto`}>
             {busy === 'inspect' ? <LoaderCircle size={16} className="animate-spin" /> : <Sparkles size={16} />}
             {busy === 'inspect' ? t('Inspecting…', 'جارٍ الفحص…') : t('Inspect files', 'فحص الملفات')}
           </button>
@@ -386,8 +388,8 @@ export function DataHub() {
             <div className="flex flex-col justify-between gap-3 border-b border-slate-700/70 p-4 sm:flex-row sm:items-center sm:px-5">
               <div><h2 className="flex items-center gap-2 text-base font-semibold"><Database size={17} className="text-[#72c6a3]" />{t('Schema & quality', 'المخطط والجودة')}</h2><p className="mt-1 text-xs text-slate-400">{t('Column-level metadata only. Cell contents are never shown.', 'بيانات وصفية على مستوى الأعمدة فقط. لا تُعرض محتويات الخلايا.')}</p></div>
               <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => void download('xlsx')} disabled={!files.length || busy !== null} className="btn-ghost min-h-9 border border-slate-700"><ArrowDownToLine size={14} />{busy === 'export-xlsx' ? t('Preparing…', 'جارٍ التجهيز…') : t('Excel summary', 'ملخص Excel')}</button>
-                <button type="button" onClick={() => void download('pdf')} disabled={!files.length || busy !== null} className="btn-ghost min-h-9 border border-slate-700"><ArrowDownToLine size={14} />{busy === 'export-pdf' ? t('Preparing…', 'جارٍ التجهيز…') : t('PDF summary', 'ملخص PDF')}</button>
+                <button type="button" onClick={() => void download('xlsx')} disabled={!files.length || busy !== null || forecastBusy || scenarioBusy || chatBusy} className="btn-ghost min-h-9 border border-slate-700"><ArrowDownToLine size={14} />{busy === 'export-xlsx' ? t('Preparing…', 'جارٍ التجهيز…') : t('Excel summary', 'ملخص Excel')}</button>
+                <button type="button" onClick={() => void download('pdf')} disabled={!files.length || busy !== null || forecastBusy || scenarioBusy || chatBusy} className="btn-ghost min-h-9 border border-slate-700"><ArrowDownToLine size={14} />{busy === 'export-pdf' ? t('Preparing…', 'جارٍ التجهيز…') : t('PDF summary', 'ملخص PDF')}</button>
               </div>
             </div>
             <div className="grid gap-3 border-b border-slate-700/70 bg-[#171a34]/35 p-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -436,6 +438,14 @@ export function DataHub() {
             </div>
           </section>
 
+          <WorkforceScenarioStudio
+            datasets={inspection.datasets}
+            files={files}
+            cleaningOptions={cleaning}
+            disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy}
+            onBusyChange={setScenarioBusy}
+          />
+
           <section className={`${card} p-4 sm:p-5`}>
             <div className="mb-4 flex items-start gap-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#5378ac]/15 text-[#a9c3eb]"><BarChart3 size={17} /></div><div><h2 className="text-base font-semibold">{t('Local forecast', 'توقع محلي')}</h2><p className="mt-1 text-xs leading-5 text-slate-400">{t('Available only when a date field and a permitted numeric measure or record count are present.', 'يتاح عند وجود حقل تاريخ ومقياس رقمي مسموح أو عدد السجلات.')}</p></div></div>
             {inspection.datasets.some((dataset) => dataset.date_columns?.length && (dataset.columns.some((column) => !column.sensitive && !!column.numeric_summary) || dataset.analyzed_rows >= 0)) ? <>
@@ -445,7 +455,7 @@ export function DataHub() {
                 <label className="block text-xs text-slate-400">{t('Measure', 'المقياس')}<select className={`${inputClass} mt-1.5`} value={forecastMetric} onChange={(event) => setForecastMetric(event.target.value)}><option value="__rows__">{t('Record count', 'عدد السجلات')}</option>{permittedMeasures.map((column) => <option key={column} value={column}>{column}</option>)}</select></label>
                 <label className="block text-xs text-slate-400">{t('Aggregation', 'التجميع')}<select className={`${inputClass} mt-1.5`} value={forecastMetric === '__rows__' ? 'count' : aggregation} onChange={(event) => setAggregation(event.target.value as typeof aggregation)} disabled={forecastMetric === '__rows__'}><option value="sum">{t('Sum', 'المجموع')}</option><option value="mean">{t('Mean', 'المتوسط')}</option><option value="count">{t('Count', 'العدد')}</option></select></label>
                 <label className="block text-xs text-slate-400">{t('Horizon', 'الأفق')}<select className={`${inputClass} mt-1.5`} value={horizon} onChange={(event) => setHorizon(Number(event.target.value))}>{Array.from({ length: 12 }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} {t('periods', 'فترات')}</option>)}</select></label>
-                <button type="submit" disabled={!forecastDate || forecastBusy} className={`${primaryButton} w-full xl:w-auto`}>{forecastBusy ? <LoaderCircle size={15} className="animate-spin" /> : <ArrowUpRight size={15} />}{t('Forecast', 'توقع')}</button>
+                <button type="submit" disabled={!forecastDate || forecastBusy || scenarioBusy} className={`${primaryButton} w-full xl:w-auto`}>{forecastBusy ? <LoaderCircle size={15} className="animate-spin" /> : <ArrowUpRight size={15} />}{t('Forecast', 'توقع')}</button>
               </form>
               {forecast && <div className="mt-5 rounded-xl border border-slate-700/70 bg-[#171a34]/55 p-3 sm:p-4">
                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-semibold text-slate-100">{forecast.filename} · {forecast.metric_column === '__rows__' ? t('Record count', 'عدد السجلات') : forecast.metric_column}</div><div className="mt-1 text-[10px] text-slate-500">{forecast.method} · {forecast.period_grain} · {number(forecast.observation_count)} {t('observations', 'مشاهدات')} · {t('Backtest MAE', 'متوسط الخطأ المطلق للاختبار')} {number(forecast.backtest_mae)} ({number(forecast.validation_periods)} {t('periods', 'فترات')})</div></div><div className="text-[10px] text-slate-500">{t('Observed + forecast', 'فعلي + متوقع')}</div></div>
@@ -485,15 +495,15 @@ export function DataHub() {
             </div>
             <form onSubmit={(event) => void askLocal(event)} className="flex gap-2 border-t border-slate-700/70 bg-[#171a34]/35 p-3 sm:p-4">
               <label className="sr-only" htmlFor="datahub-question">{t('Ask a question about the selected files', 'اطرح سؤالاً حول الملفات المحددة')}</label>
-              <input id="datahub-question" value={question} onChange={(event) => setQuestion(event.target.value)} className={inputClass} placeholder={t('Ask about totals, trends or file structure…', 'اسأل عن الإجماليات أو الاتجاهات أو بنية الملفات…')} disabled={!files.length || chatBusy} />
-              <button type="submit" className={`${primaryButton} shrink-0 px-3 sm:px-4`} disabled={!files.length || !question.trim() || chatBusy} aria-label={t('Send question', 'إرسال السؤال')}>{chatBusy ? <LoaderCircle size={16} className="animate-spin" /> : <ArrowUpRight size={16} />}</button>
+              <input id="datahub-question" value={question} onChange={(event) => setQuestion(event.target.value)} className={inputClass} placeholder={t('Ask about totals, trends or file structure…', 'اسأل عن الإجماليات أو الاتجاهات أو بنية الملفات…')} disabled={!files.length || chatBusy || scenarioBusy} />
+              <button type="submit" className={`${primaryButton} shrink-0 px-3 sm:px-4`} disabled={!files.length || !question.trim() || chatBusy || scenarioBusy} aria-label={t('Send question', 'إرسال السؤال')}>{chatBusy ? <LoaderCircle size={16} className="animate-spin" /> : <ArrowUpRight size={16} />}</button>
             </form>
           </section>
         </>}
 
         <section className="flex flex-col gap-3 rounded-2xl border border-[#5378ac]/25 bg-[#202447]/55 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-2.5"><LockKeyhole size={16} className="mt-0.5 shrink-0 text-[#9db8df]" /><p className="text-xs leading-5 text-slate-400"><strong className="text-slate-300">{t('Provenance & privacy', 'المصدر والخصوصية')}.</strong> {t(`Mode: ${inspection.privacy?.mode ?? 'local'}. Source rows returned: ${inspection.privacy?.source_rows_returned ? 'yes' : 'no'}. Sensitive column values returned: ${inspection.privacy?.sensitive_column_values_returned ? 'yes' : 'no'}. Persisted: ${inspection.privacy?.persisted ? 'yes' : 'no'}.`, `الوضع: ${inspection.privacy?.mode ?? 'محلي'}. أعيدت سجلات المصدر: ${inspection.privacy?.source_rows_returned ? 'نعم' : 'لا'}. أعيدت قيم الأعمدة الحساسة: ${inspection.privacy?.sensitive_column_values_returned ? 'نعم' : 'لا'}. تم الحفظ: ${inspection.privacy?.persisted ? 'نعم' : 'لا'}.`)}</p></div>
-          <button type="button" onClick={() => { setFiles([]); setInspection(null); setForecast(null); setTurns([]); setError('') }} disabled={busy !== null || forecastBusy || chatBusy} className="btn-ghost shrink-0 border border-slate-700 text-xs"><Trash2 size={14} />{t('Clear session', 'مسح الجلسة')}</button>
+          <button type="button" onClick={() => { setFiles([]); setInspection(null); setForecast(null); setTurns([]); setError('') }} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} className="btn-ghost shrink-0 border border-slate-700 text-xs"><Trash2 size={14} />{t('Clear session', 'مسح الجلسة')}</button>
         </section>
       </div>}
 
