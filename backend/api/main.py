@@ -43,6 +43,7 @@ from config.settings import API_HOST, API_PORT, API_PREFIX, PLATFORM_NAME, PLATF
 from backend.api.auth_routes import router as auth_router
 from backend.core.local_auth import get_auth_manager
 from backend.api.local_analysis_routes import create_local_analysis_router
+from backend.api.data_hub_routes import create_data_hub_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ def create_app() -> Any:
 
     # ── LOCAL ANALYSIS (authenticated, single organisation) ─────────────────
     app.include_router(create_local_analysis_router())
+    app.include_router(create_data_hub_router())
 
     # ── FIRST-BOOT: create admin only from the Replit Secrets value ────────────
     _bootstrap_password = _os.environ.get("AWI_ADMIN_BOOTSTRAP_PASSWORD", "")
