@@ -237,25 +237,40 @@ class LocalFileAnalyticsTests(unittest.TestCase):
 
     def test_arabic_expired_contract_count_uses_observed_status_value(self) -> None:
         frame = pd.DataFrame({
-            "حالة العقد": ["منتهي", "نشط", "منتهي", None],
-            "القسم": ["المبيعات", "المبيعات", "العمليات", "العمليات"],
+            "حالة العقد": ["منتهي", "نشط", "منتهي"],
+            "القسم": ["المبيعات", "المبيعات", "العمليات"],
         })
         answer = answer_question(
             "كم عقد منتهي؟", {}, use_llm=False,
             uploaded_frames={"contracts.csv": frame},
         )
+        self.assertEqual(answer.matched_query_id, "local.contract_expired_count")
+        self.assertIn("العقود المنتهية", answer.answer_text)
+        self.assertIn("2", answer.answer_text)
+
+    def test_arabic_schema_based_count_without_contract_template(self) -> None:
+        frame = pd.DataFrame({"الحالة": ["منتهي", "نشط", "منتهي", None]})
+        answer = answer_question(
+            "كم سجل حالته منتهي؟", {}, use_llm=False,
+            uploaded_frames={"records.csv": frame},
+        )
         self.assertEqual(answer.matched_query_id, "local.count")
         self.assertIn("عدد السجلات", answer.answer_text)
         self.assertEqual(answer.query_audit["cohorts"][0]["value"], 2)
-        self.assertEqual(answer.query_audit["cohorts"][0]["filters"][0]["value"], "منتهي")
+
+    def test_arabic_how_much_measure_question_sums_instead_of_counting_rows(self) -> None:
+        frame = pd.DataFrame({"المبيعات": [12.5, 7.5, 30.0]})
+        answer = analyze_local_question("كم قيمة المبيعات؟", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "total")
+        self.assertIn("50.00", answer.detail)
 
     def test_natural_english_count_filter_is_applied_and_audited(self) -> None:
         frame = pd.DataFrame({
-            "Contract Status": ["Expired", "Active", "Expired", None],
+            "Status": ["Expired", "Active", "Expired", "Active"],
             "Department": ["Sales", "Sales", "Operations", "Operations"],
         })
         answer = answer_question(
-            "How many contracts are Expired?", {}, use_llm=False,
+            "How many records have Expired status?", {}, use_llm=False,
             uploaded_frames={"contracts.csv": frame},
         )
         self.assertEqual(answer.matched_query_id, "local.count")
@@ -271,6 +286,17 @@ class LocalFileAnalyticsTests(unittest.TestCase):
         self.assertEqual(answer.operation, "grouped_total")
         self.assertIn("Sales: 40.00", answer.detail)
         self.assertIn("Retail: 20.00", answer.detail)
+
+    def test_duplicate_category_values_across_columns_require_a_column_name(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Retail", "Online"],
+            "Region": ["Retail", "West"],
+            "Sales": [10, 20],
+        })
+        answer = analyze_local_question("Total Sales for Retail", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+        self.assertTrue(answer.priority)
+        self.assertIn("Possible values", answer.detail)
 
     def test_unmatched_uploaded_data_question_returns_schema_guidance(self) -> None:
         frame = pd.DataFrame({

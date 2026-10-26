@@ -37,7 +37,7 @@ _COUNT_TERMS = {"count", "many", "number", "records", "rows", "عدد", "كم", 
 _SUM_TERMS = {"sum", "total", "overall", "amount", "مجموع", "اجمالي", "قيمة", "قيمه"}
 _AVERAGE_TERMS = {"average", "avg", "mean", "typical", "متوسط", "معدل"}
 _TOP_TERMS = {"highest", "largest", "top", "most", "maximum", "max", "اعلي", "الاكثر", "اكثر", "اكبر"}
-_BOTTOM_TERMS = {"lowest", "smallest", "bottom", "least", "minimum", "min", "أقل", "الاقل", "ادنى", "اصغر"}
+_BOTTOM_TERMS = {"lowest", "smallest", "bottom", "least", "minimum", "min", "اقل", "ادني", "اصغر"}
 _TREND_TERMS = {"trend", "trending", "over time", "month", "monthly", "year", "yearly", "time", "اتجاه", "شهريا", "شهري", "سنويا", "سنوي"}
 _GROUP_TERMS = {"by", "per", "each", "group", "grouped", "breakdown", "distribution", "حسب", "لكل", "بحسب", "توزيع", "تصنيف", "تقسيم"}
 _RECORD_TERMS = {
@@ -90,6 +90,10 @@ def _tokens(text: str) -> set[str]:
 
 def _language_is_arabic(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06ff]", text))
+
+
+def _localized(question: str, english: str, arabic: str) -> str:
+    return arabic if _language_is_arabic(question) else english
 
 
 def _safe_column(name: Any) -> bool:
@@ -152,6 +156,10 @@ def _natural_category_filters(
     grouping_intent = bool(asked & (_GROUP_TERMS - {"by", "per", "each"})) or bool(
         raw_words & {"by", "per", "each"}
     )
+    explicit_filter_cue = bool(
+        raw_words & {"for", "in", "where", "only", "with"}
+        or asked & {"في", "فقط", "لدى", "ل"}
+    )
     measure_tokens = set().union(*(
         _tokens(str(column))
         for column in columns
@@ -174,15 +182,35 @@ def _natural_category_filters(
             value_tokens = _tokens(value)
             if not value_tokens or len(value_tokens) > 6:
                 continue
-            discriminating = value_tokens - column_tokens - operation_words - measure_tokens
+            ignored_measure_tokens = measure_tokens if grouping_intent or not explicit_filter_cue else set()
+            discriminating = value_tokens - column_tokens - operation_words - ignored_measure_tokens
             if discriminating and value_tokens <= asked:
                 candidates.setdefault(column, set()).add(value)
 
+    explicit_columns = [
+        column for column in columns
+        if _tokens(str(column)) and _tokens(str(column)) <= asked
+    ]
+    cross_column_ambiguity: list[tuple[str, list[str]]] = []
+    for value in {value for values in candidates.values() for value in values}:
+        matching_columns = [column for column, values in candidates.items() if value in values]
+        if len(matching_columns) < 2:
+            continue
+        named_columns = [column for column in matching_columns if column in explicit_columns]
+        if len(named_columns) == 1:
+            for column in matching_columns:
+                if column != named_columns[0]:
+                    candidates[column].discard(value)
+        else:
+            cross_column_ambiguity.extend((column, [value]) for column in matching_columns)
+
+    candidates = {column: values for column, values in candidates.items() if values}
     ambiguous = [
         (column, sorted(values))
         for column, values in candidates.items()
         if len(values) > 1
     ]
+    ambiguous.extend(cross_column_ambiguity)
     if ambiguous:
         return [], ambiguous
     filters = [
@@ -452,12 +480,23 @@ def analyze_local_question(
     if ambiguous_filters:
         choices = "; ".join(f"{column}: {', '.join(values[:6])}" for column, values in ambiguous_filters[:5])
         return LocalTableAnswer(
-            "The request matches multiple observed category values. Name the exact value(s) so I don't apply the wrong filter.",
+            _localized(
+                q,
+                "The request matches multiple observed category values. Name the exact value(s) so I don't apply the wrong filter.",
+                "يطابق السؤال عدة قيم فئوية موجودة. حدّد القيمة المطلوبة بدقة لتجنب تطبيق مرشح غير صحيح.",
+            ),
             f"Possible values: {choices}", "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
 
-    count_intent = bool(q_tokens & _COUNT_TERMS)
     record_question = bool(q_tokens & _RECORD_TERMS)
+    possible_numeric_measures = _match_columns(q, frame, numeric_columns)
+    arabic_sum_intent = bool(
+        "كم" in q_tokens and possible_numeric_measures
+        and (bool(q_tokens & _SUM_TERMS) or not record_question)
+    )
+    count_intent = bool(q_tokens & (_COUNT_TERMS - {"كم"})) or (
+        "كم" in q_tokens and not arabic_sum_intent
+    )
     if record_question and category_filters and not count_intent:
         count_intent = True
         has_aggregation_intent = True
@@ -471,7 +510,11 @@ def analyze_local_question(
     )
     if hard_filter_terms.search(q):
         return LocalTableAnswer(
-            "I couldn't safely interpret this condition or operation; I won't report a partial or unfiltered result. " + HELP,
+            _localized(
+                q,
+                "I couldn't safely interpret this condition or operation; I won't report a partial or unfiltered result. " + HELP,
+                "تعذر تفسير هذا الشرط أو العملية بأمان؛ لن أعرض نتيجة جزئية أو غير مصفاة. " + HELP,
+            ),
             "", "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
     if re.search(r"\b(where|only)\b|فقط", q, re.I) and not category_filters:
@@ -480,13 +523,25 @@ def analyze_local_question(
             if column not in numeric_columns and frame[column].nunique(dropna=True) <= 50
         ]
         return LocalTableAnswer(
-            "I couldn't match the requested filter to one exact value in the uploaded data. I won't return an unfiltered result.",
-            f"Available category columns: {', '.join(categories[:10]) or 'none detected'}",
+            _localized(
+                q,
+                "I couldn't match the requested filter to one exact value in the uploaded data. I won't return an unfiltered result.",
+                "لم أجد قيمة مطابقة تماماً للمرشح في البيانات؛ لن أعرض نتيجة غير مصفاة.",
+            ),
+            _localized(
+                q,
+                f"Available category columns: {', '.join(categories[:10]) or 'none detected'}",
+                f"أعمدة الفئات المتاحة: {', '.join(categories[:10]) or 'لم تُكتشف'}",
+            ),
             "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
     if re.search(r"\b\d{4}-\d{2}-\d{2}\b|\b\d+(?:\.\d+)?\b", q):
         return LocalTableAnswer(
-            "The question includes a date or numeric condition that needs an explicit, unambiguous filter. Use the displayed column name and ISO dates (YYYY-MM-DD), or describe an exact observed category.",
+            _localized(
+                q,
+                "The question includes a date or numeric condition that needs an explicit, unambiguous filter. Use the displayed column name and ISO dates (YYYY-MM-DD), or describe an exact observed category.",
+                "يتضمن السؤال شرطاً رقمياً أو تاريخياً يحتاج إلى مرشح صريح وواضح. استخدم اسم العمود الظاهر وتاريخ YYYY-MM-DD، أو اذكر قيمة فئوية موجودة حرفياً.",
+            ),
             HELP, "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
 
@@ -508,12 +563,20 @@ def analyze_local_question(
         filtered_frame = frame.loc[mask]
     if not numeric_columns and not count_intent:
         return LocalTableAnswer(
-            "This file has no columns with enough consistently numeric values for a reliable calculation. Check the extracted columns and number formats.",
+            _localized(
+                q,
+                "This file has no columns with enough consistently numeric values for a reliable calculation. Check the extracted columns and number formats.",
+                "لا يحتوي الملف على عمود رقمي متسق بما يكفي لإجراء حساب موثوق. راجع الأعمدة المستخرجة وتنسيق الأرقام.",
+            ),
             "", "clarify", filename, len(frame), safe_columns, [],
         )
 
     average_intent = bool(q_tokens & _AVERAGE_TERMS)
-    sum_intent = bool(q_tokens & _SUM_TERMS) or bool(raw_tokens & {"how", "much"})
+    sum_intent = (
+        bool(q_tokens & _SUM_TERMS)
+        or bool(raw_tokens & {"how", "much"})
+        or arabic_sum_intent
+    )
     top_intent = bool(q_tokens & _TOP_TERMS)
     bottom_intent = bool(q_tokens & _BOTTOM_TERMS)
     trend_intent = bool(q_tokens & _TREND_TERMS)
@@ -532,13 +595,25 @@ def analyze_local_question(
     matched_numeric = _match_columns(q, frame, numeric_columns)
     if len(matched_numeric) > 1:
         return LocalTableAnswer(
-            "The question could refer to more than one numeric column. Name the exact measure (for example, \"total Net Sales\").",
-            f"Possible measures: {', '.join(matched_numeric[:10])}",
+            _localized(
+                q,
+                "The question could refer to more than one numeric column. Name the exact measure (for example, \"total Net Sales\").",
+                "قد يشير السؤال إلى أكثر من عمود رقمي. حدّد المقياس المطلوب باسمه بدقة.",
+            ),
+            _localized(
+                q,
+                f"Possible measures: {', '.join(matched_numeric[:10])}",
+                f"المقاييس المحتملة: {', '.join(matched_numeric[:10])}",
+            ),
             "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
     if not matched_numeric and not count_intent:
         return LocalTableAnswer(
-            f"Please name the measure to calculate. Numeric columns: {', '.join(numeric_columns[:10])}",
+            _localized(
+                q,
+                f"Please name the measure to calculate. Numeric columns: {', '.join(numeric_columns[:10])}",
+                f"حدّد المقياس المطلوب حسابه. الأعمدة الرقمية: {', '.join(numeric_columns[:10])}",
+            ),
             "", "clarify", filename, len(frame), safe_columns, [],
         )
 
@@ -557,16 +632,32 @@ def analyze_local_question(
     dimensions = _match_columns(q, frame, dimension_candidates) if by_intent else []
     if len(dimensions) > 1:
         return LocalTableAnswer(
-            "Please name one grouping column; the question matches more than one.",
-            f"Possible groupings: {', '.join(dimensions[:10])}",
+            _localized(
+                q,
+                "Please name one grouping column; the question matches more than one.",
+                "حدّد عمود تجميع واحداً؛ فالسؤال يطابق أكثر من عمود.",
+            ),
+            _localized(
+                q,
+                f"Possible groupings: {', '.join(dimensions[:10])}",
+                f"أعمدة التجميع المحتملة: {', '.join(dimensions[:10])}",
+            ),
             "clarify", filename, len(frame), safe_columns, [],
         )
     dimension = dimensions[0] if dimensions else None
 
     if by_intent and dimension is None and not trend_intent:
         return LocalTableAnswer(
-            "I couldn't identify one unambiguous group-by column. Include its column name, such as \"by department\".",
-            f"Available groupings: {', '.join(dimension_candidates[:10])}",
+            _localized(
+                q,
+                "I couldn't identify one unambiguous group-by column. Include its column name, such as \"by department\".",
+                "تعذر تحديد عمود تجميع واحد بوضوح. اذكر اسم العمود المطلوب.",
+            ),
+            _localized(
+                q,
+                f"Available groupings: {', '.join(dimension_candidates[:10])}",
+                f"أعمدة التجميع المتاحة: {', '.join(dimension_candidates[:10])}",
+            ),
             "clarify", filename, len(frame), safe_columns, [],
         )
 

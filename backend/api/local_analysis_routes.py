@@ -3204,11 +3204,10 @@ def create_local_analysis_router() -> Any:
     # ── Phase 37: AI Business Analyst (capstone — Q&A over HR + all 6 BI domains) ─
     # Security-critical: see ai_business_analyst_engine.py's module docstring
     # for the full trust-boundary architecture. This route only ever calls
-    # `answer_question()`, which internally only ever calls a fixed,
-    # pre-registered set of existing engine functions or the local TF-IDF
-    # RAG index over project markdown docs — never arbitrary code, never a
-    # free-form calculations. A small local dataframe interpreter is enabled
-    # only after that registry has no answer.
+    # `answer_question()`: uploaded tables use the bounded local dataframe
+    # interpreter; specialized domain metrics use existing registered engines;
+    # documentation questions use local TF-IDF RAG. None of these paths
+    # executes user-generated code or SQL.
 
     @router.get("/ai-business-analyst/registry")
     async def local_ai_business_analyst_registry():
