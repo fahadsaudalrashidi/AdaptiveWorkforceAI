@@ -56,9 +56,14 @@ def create_data_hub_router() -> APIRouter:
         if len(files) > MAX_FILES_PER_REQUEST:
             raise HTTPException(status_code=413, detail=f"Upload no more than {MAX_FILES_PER_REQUEST} files at a time.")
         total = 0
+        seen_names: set[str] = set()
         uploads: list[tuple[str, bytes]] = []
         for file in files:
             filename = Path(file.filename or "upload.dat").name
+            normalized_name = filename.casefold()
+            if normalized_name in seen_names:
+                raise HTTPException(status_code=422, detail="Each uploaded file must have a unique filename.")
+            seen_names.add(normalized_name)
             suffix = Path(filename).suffix.lower()
             if suffix not in SUPPORTED_DATA_HUB_EXTENSIONS:
                 raise HTTPException(status_code=415, detail=f"{filename}: use CSV, XLS, XLSX, or JSON.")
@@ -81,8 +86,9 @@ def create_data_hub_router() -> APIRouter:
             try:
                 profiles = await asyncio.to_thread(profile_upload, content, filename, options)
                 datasets.extend(profiles)
-            except ValueError as exc:
-                errors.append({"filename": filename, "detail": str(exc)})
+            except ValueError:
+                logger.info("Data Hub rejected an unreadable upload: %s", filename)
+                errors.append({"filename": filename, "detail": "The file could not be profiled safely. Verify it is a valid table and try again."})
             except Exception:
                 logger.exception("Data Hub profiling failed for %s", filename)
                 errors.append({"filename": filename, "detail": "The file could not be profiled safely. Check its format and try again."})
@@ -120,6 +126,7 @@ def create_data_hub_router() -> APIRouter:
         metric_column: str = Form("__rows__"),
         aggregation: str = Form("count"),
         horizon: int = Form(3),
+        language: str = Form("en"),
     ) -> dict[str, Any]:
         """Project a monthly trend from a selected date and measure."""
         filename = Path(file.filename or "upload.dat").name
@@ -130,6 +137,8 @@ def create_data_hub_router() -> APIRouter:
             raise HTTPException(status_code=413, detail="Each file must be 25 MB or smaller.")
         if not raw:
             raise HTTPException(status_code=422, detail="The uploaded file is empty.")
+        if language not in {"en", "ar"}:
+            raise HTTPException(status_code=422, detail="language must be 'en' or 'ar'.")
 
         def build() -> dict[str, Any]:
             results = ExcelIngestionEngine().ingest_all(raw, filename)
@@ -142,7 +151,7 @@ def create_data_hub_router() -> APIRouter:
             )
             if selected is None or selected.df is None:
                 raise ValueError("The selected worksheet could not be found or read.")
-            return forecast_frame(
+            result = forecast_frame(
                 selected.df,
                 filename=filename,
                 sheet=selected.sheet_used or sheet or "Data",
@@ -151,6 +160,24 @@ def create_data_hub_router() -> APIRouter:
                 aggregation=aggregation,
                 horizon=horizon,
             )
+            if language == "ar":
+                model_names = {
+                    "naive": "الساذج",
+                    "linear_trend": "الاتجاه الخطي",
+                    "seasonal_naive": "الموسمي الساذج",
+                }
+                result["method"] = (
+                    f"اختيار النموذج بالتحقق التتابعي "
+                    f"({model_names.get(result['selected_model'], result['selected_model'])}) "
+                    "مع حدود خطأ تتسع مع الأفق"
+                )
+                result["limitations"] = [
+                    "يُختار النموذج باستخدام اختبار تتابعي قصير لفترة واحدة؛ وقد يكون الاختيار غير مستقر مع قلة البيانات التاريخية.",
+                    "النطاقات حدود تقريبية مبنية على أخطاء الاختبار وبحد أدنى غير صفري، وليست ضمانات أو احتمالات معايرة.",
+                    "لا تتضمن النماذج العوامل السببية أو القيود التشغيلية أو تغييرات السياسات المستقبلية.",
+                    "تحقق من النتائج وفقاً للمعرفة التشغيلية قبل استخدامها في قرارات القوى العاملة أو المالية.",
+                ]
+            return result
 
         try:
             return await asyncio.to_thread(build)

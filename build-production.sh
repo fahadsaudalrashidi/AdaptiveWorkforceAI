@@ -19,10 +19,10 @@ export PYTHONNOUSERSITE=1
 # -S disables editor/system site-packages: fail this build, not production
 # startup, if any key runtime dependency is absent from the release prefix.
 python -S - <<'PY'
-import uvicorn, fastapi, psycopg, pandas, openpyxl, pdfplumber, pypdfium2
+import uvicorn, fastapi, psycopg, pandas, openpyxl, pdfplumber, pypdfium2, fpdf, uharfbuzz
 from pathlib import Path
 prefix = Path(".production-python").resolve()
-for module in (uvicorn, fastapi, psycopg, pandas, openpyxl, pdfplumber, pypdfium2):
+for module in (uvicorn, fastapi, psycopg, pandas, openpyxl, pdfplumber, pypdfium2, fpdf, uharfbuzz):
     if not Path(module.__file__).resolve().is_relative_to(prefix):
         raise RuntimeError(f"Release dependency escaped production prefix: {module.__name__}")
 print("Isolated production Python dependency check passed.")

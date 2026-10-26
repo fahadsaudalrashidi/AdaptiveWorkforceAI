@@ -45,7 +45,7 @@ class AWIRole(str, Enum):
 
 PERMISSION_MATRIX: dict[str, list[AWIRole]] = {
     "upload_data":           [AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.HR_ANALYST],
-    "run_analysis":          [AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.HR_ANALYST],
+    "run_analysis":          [AWIRole.EXECUTIVE, AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.HR_ANALYST],
     "view_employee_table":   [AWIRole.CHRO, AWIRole.HR_MANAGER],
     "export_csv":            [AWIRole.CHRO, AWIRole.HR_MANAGER],
     "export_pdf_report":     [AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.EXECUTIVE],

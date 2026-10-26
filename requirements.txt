@@ -1,6 +1,3 @@
 # Default dependency entrypoint for the active THRIVE web application.
 # The retired ML/Streamlit dependency list is preserved in requirements-legacy.txt.
 -r backend/requirements-replit.txt
-backend
-fpdf2
-uharfbuzz

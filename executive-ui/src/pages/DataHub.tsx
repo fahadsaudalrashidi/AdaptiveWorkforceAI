@@ -6,17 +6,17 @@ import {
   MessageSquareText, Plus, Search, ShieldCheck, Sparkles, Trash2, UploadCloud, X,
 } from 'lucide-react'
 import {
-  Area, AreaChart, CartesianGrid, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Area, AreaChart, CartesianGrid, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { useLanguage } from '../context/LanguageContext'
-import { requestLocalAnalysis } from '../components/analytics/analysisStream'
+import { requestLocalAnalysis, type ExtractionProgress } from '../components/analytics/analysisStream'
 
 type CleaningId = 'trim_text' | 'remove_blank_rows' | 'remove_blank_columns' | 'remove_exact_duplicates'
 interface ColumnProfile {
   name: string; dtype: string; type: string; missing_count: number; missing_percent: number
   unique_count: number; sensitive: boolean; sensitive_reason: string | null
-  numeric_summary: { non_null: number; mean: number; median: number; min: number; max: number; std: number } | null
-  outlier_count: number | null
+  numeric_summary?: { non_null: number; mean: number | null; median: number | null; min: number | null; max: number | null; std: number | null } | null
+  outlier_count?: number | null
 }
 interface Anomaly {
   id: string; kind: string; column: string; count: number; evaluated: number; percentage: number
@@ -24,10 +24,11 @@ interface Anomaly {
 }
 interface DatasetProfile {
   id: string; filename: string; sheet: string; source_type: string; source_rows: number; analyzed_rows: number
-  source_columns: string[]; analyzed_columns: string[]; column_count: number; missing_cells: number
+  source_columns: number; analyzed_columns: number; column_count: number; missing_cells: number
   missing_percent: number; duplicate_rows: number; quality_score: number; columns: ColumnProfile[]
-  numeric_columns: string[]; date_columns: string[]; anomalies: Anomaly[]; cleaning_suggestions: string[]
-  applied_cleaning: string[]; warnings: string[]; ingestion_transformations: string[]
+  numeric_columns: string[]; date_columns: string[]; anomalies: Anomaly[]
+  cleaning_suggestions: { id: CleaningId; eligible: number | boolean; reason: string }[]
+  applied_cleaning: { id: CleaningId; changed: number }[]; warnings: string[]; ingestion_transformations: string[]
 }
 interface InspectResponse {
   datasets: DatasetProfile[]; errors: { filename: string; detail: string }[]; files_processed: number
@@ -36,6 +37,7 @@ interface InspectResponse {
 interface ForecastResponse {
   filename: string; sheet: string; date_column: string; metric_column: string; aggregation: string
   period_grain: string; method: string; observation_count: number
+  selected_model: string; backtest_mae: number | null; validation_periods: number
   observed: { period: string; value: number }[]; forecast: { period: string; estimate: number; lower: number; upper: number }[]
   limitations: string[]
 }
@@ -62,6 +64,10 @@ function bytes(size: number, isAr: boolean) {
 function number(value: number | null | undefined) {
   return value == null || !Number.isFinite(value) ? '—' : value.toLocaleString('en-US', { maximumFractionDigits: 2 })
 }
+function cleaningLabel(id: CleaningId, translate: (en: string, ar: string) => string) {
+  const option = CLEANING.find((item) => item.id === id)
+  return option ? translate(option.en, option.ar) : id
+}
 function errorMessage(response: Response, body: unknown) {
   const detail = body && typeof body === 'object' && 'detail' in body ? (body as { detail?: unknown }).detail : null
   return typeof detail === 'string' ? detail : `Request failed (${response.status})`
@@ -87,11 +93,14 @@ export function DataHub() {
   const [question, setQuestion] = useState('')
   const [turns, setTurns] = useState<ChatTurn[]>([])
   const [chatBusy, setChatBusy] = useState(false)
+  const [extractionProgress, setExtractionProgress] = useState<ExtractionProgress | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const ready = !!inspection?.datasets.length && inspection.files_processed > 0
   const selectedBytes = files.reduce((sum, file) => sum + file.size, 0)
-  const activeForecastDataset = inspection?.datasets.find((item) => item.id === forecastDataset) ?? inspection?.datasets[0]
+  const activeForecastDataset = inspection?.datasets.find((item) => item.id === forecastDataset)
+    ?? inspection?.datasets.find((item) => item.date_columns?.length)
+    ?? inspection?.datasets[0]
   const permittedMeasures = useMemo(() => {
     if (!activeForecastDataset) return []
     return activeForecastDataset.columns.filter((column) => !column.sensitive && !!column.numeric_summary).map((column) => column.name)
@@ -108,34 +117,64 @@ export function DataHub() {
       || (schemaFilter === 'missing' && column.missing_count > 0)
     return matchesText && matchesFilter
   }), [inspection, search, schemaFilter])
+  const forecastChartData = useMemo(() => {
+    if (!forecast) return []
+    return [
+      ...forecast.observed.map((point, index) => ({
+        period: point.period,
+        observed: point.value,
+        estimate: index === forecast.observed.length - 1 ? point.value : null,
+        lower: null as number | null,
+        interval: null as number | null,
+      })),
+      ...forecast.forecast.map((point) => ({
+        period: point.period,
+        observed: null as number | null,
+        estimate: point.estimate,
+        lower: point.lower,
+        interval: Math.max(0, point.upper - point.lower),
+      })),
+    ]
+  }, [forecast])
 
   const addFiles = (incoming: File[]) => {
-    setError('')
+    if (busy || forecastBusy || chatBusy) return
+    const issues: string[] = []
+    const next = [...files]
     const accepted = incoming.filter((file) => ACCEPTED.test(file.name))
-    if (accepted.length !== incoming.length) setError(t('Some files were skipped. Choose CSV, XLS, XLSX or JSON files only.', 'تم تخطي بعض الملفات. اختر ملفات CSV أو XLS أو XLSX أو JSON فقط.'))
-    setFiles((current) => {
-      const next = [...current]
-      for (const file of accepted) {
-        if (next.some((item) => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)) continue
-        if (file.size > MAX_FILE) { setError(t(`${file.name} exceeds the 25 MB per-file limit.`, `يتجاوز الملف ${file.name} الحد الأقصى البالغ 25 م.ب.`)); continue }
-        if (next.length >= MAX_FILES) { setError(t('The limit is 10 files per analysis.', 'الحد الأقصى 10 ملفات لكل تحليل.')); break }
-        if (next.reduce((sum, item) => sum + item.size, 0) + file.size > MAX_TOTAL) { setError(t('The combined file size exceeds 50 MB.', 'يتجاوز الحجم الإجمالي للملفات 50 م.ب.')); break }
-        next.push(file)
-      }
-      return next
-    })
-    setInspection(null)
-    setForecast(null)
+    if (accepted.length !== incoming.length) issues.push(t('Some files were skipped. Choose CSV, XLS, XLSX or JSON files only.', 'تم تخطي بعض الملفات. اختر ملفات CSV أو XLS أو XLSX أو JSON فقط.'))
+    for (const file of accepted) {
+      if (next.some((item) => item.name === file.name)) { issues.push(t(`${file.name} is already selected or has a duplicate filename.`, `الملف ${file.name} محدد مسبقاً أو يحمل اسماً مكرراً.`)); continue }
+      if (file.size > MAX_FILE) { issues.push(t(`${file.name} exceeds the 25 MB per-file limit.`, `يتجاوز الملف ${file.name} الحد الأقصى البالغ 25 م.ب.`)); continue }
+      if (next.length >= MAX_FILES) { issues.push(t('The limit is 10 files per analysis.', 'الحد الأقصى 10 ملفات لكل تحليل.')); break }
+      if (next.reduce((sum, item) => sum + item.size, 0) + file.size > MAX_TOTAL) { issues.push(t('The combined file size exceeds 50 MB.', 'يتجاوز الحجم الإجمالي للملفات 50 م.ب.')); break }
+      next.push(file)
+    }
+    setFiles(next)
+    setError(issues.join(' '))
+    if (next.length !== files.length) {
+      setInspection(null)
+      setForecast(null)
+      setTurns([])
+    }
   }
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     addFiles(Array.from(event.target.files ?? []))
     event.target.value = ''
   }
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault(); setDragging(false); addFiles(Array.from(event.dataTransfer.files))
+    event.preventDefault(); setDragging(false)
+    if (!busy && !forecastBusy && !chatBusy) addFiles(Array.from(event.dataTransfer.files))
   }
-  const removeFile = (index: number) => { setFiles((current) => current.filter((_, i) => i !== index)); setInspection(null); setForecast(null) }
-  const toggleCleaning = (id: CleaningId) => setCleaning((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+  const removeFile = (index: number) => {
+    if (busy || forecastBusy || chatBusy) return
+    setFiles((current) => current.filter((_, i) => i !== index)); setInspection(null); setForecast(null); setTurns([])
+  }
+  const toggleCleaning = (id: CleaningId) => {
+    setCleaning((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+    setInspection(null)
+    setForecast(null)
+  }
   const buildInspectForm = () => {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))
@@ -152,7 +191,7 @@ export function DataHub() {
       const result = payload as InspectResponse
       if (!Array.isArray(result.datasets)) throw new Error(t('The inspection response was not in the expected format.', 'تنسيق استجابة الفحص غير متوقع.'))
       setInspection(result)
-      const first = result.datasets[0]
+       const first = result.datasets.find((dataset) => dataset.date_columns?.length) ?? result.datasets[0]
       if (first) {
         setForecastDataset(first.id)
         setForecastDate(first.date_columns?.[0] ?? '')
@@ -180,8 +219,9 @@ export function DataHub() {
       const filename = match?.[1] ? decodeURIComponent(match[1].replace(/"/g, '')) : `thrive-data-hub-summary.${kind}`
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
-      anchor.href = url; anchor.download = filename; anchor.click()
-      URL.revokeObjectURL(url)
+      anchor.href = url; anchor.download = filename
+      document.body.append(anchor); anchor.click(); anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch (err) { setError(err instanceof Error ? err.message : t('Export failed. Please retry.', 'تعذر التصدير. يرجى إعادة المحاولة.')) }
     finally { setBusy(null) }
   }
@@ -196,7 +236,7 @@ export function DataHub() {
       form.append('file', selectedFile); form.append('sheet', activeForecastDataset.sheet)
       form.append('date_column', forecastDate); form.append('metric_column', forecastMetric)
       form.append('aggregation', forecastMetric === '__rows__' ? 'count' : aggregation)
-      form.append('horizon', String(horizon))
+       form.append('horizon', String(horizon)); form.append('language', isAr ? 'ar' : 'en')
       const response = await fetch('/api/local/data-hub/forecast', { method: 'POST', body: form })
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(errorMessage(response, payload))
@@ -208,18 +248,39 @@ export function DataHub() {
     event.preventDefault()
     const trimmed = question.trim()
     if (!trimmed || !files.length || chatBusy) return
-    setQuestion(''); setChatBusy(true)
+    setQuestion(''); setChatBusy(true); setExtractionProgress({ stage: 'starting' })
     const turnIndex = turns.length
     setTurns((current) => [...current, { question: trimmed, loading: true }])
     try {
       const form = new FormData()
       form.append('question', trimmed); form.append('use_llm', 'false'); form.append('use_cloud', 'false')
       files.forEach((file) => form.append('files', file))
-      const result = await requestLocalAnalysis<LocalAnswer>(form, { streaming: false, onProgress: () => undefined })
+      const result = await requestLocalAnalysis<LocalAnswer>(form, {
+        streaming: true,
+        onProgress: setExtractionProgress,
+      })
       setTurns((current) => current.map((turn, index) => index === turnIndex ? { ...turn, result, loading: false } : turn))
     } catch (err) {
       setTurns((current) => current.map((turn, index) => index === turnIndex ? { ...turn, error: err instanceof Error ? err.message : t('Local analysis failed.', 'تعذر التحليل المحلي.'), loading: false } : turn))
-    } finally { setChatBusy(false) }
+    } finally { setChatBusy(false); setExtractionProgress(null) }
+  }
+
+  const progressText = (progress: ExtractionProgress) => {
+    const stages: Record<string, [string, string]> = {
+      starting: ['Preparing local analysis…', 'جارٍ إعداد التحليل المحلي…'],
+      compatibility: ['Switching to the compatible response mode…', 'جارٍ التحويل إلى وضع الاستجابة المتوافق…'],
+      parsing: ['Reading the selected file…', 'جارٍ قراءة الملف المحدد…'],
+      ocr: ['Extracting text from the document…', 'جارٍ استخراج النص من المستند…'],
+      scanning: ['Reviewing data privacy…', 'جارٍ فحص خصوصية البيانات…'],
+      analyzing: ['Analyzing the uploaded data…', 'جارٍ تحليل البيانات المرفوعة…'],
+      standard: ['Analyzing locally…', 'جارٍ التحليل محلياً…'],
+    }
+    const [english, arabic] = stages[progress.stage.toLowerCase()] ?? ['Processing locally…', 'جارٍ المعالجة محلياً…']
+    const page = progress.page && progress.total_pages
+      ? t(`Page ${progress.page} of ${progress.total_pages}`, `الصفحة ${progress.page} من ${progress.total_pages}`)
+      : ''
+    const source = progress.filename ? ` · ${progress.filename}` : ''
+    return `${t(english, arabic)}${page ? ` · ${page}` : ''}${source}`
   }
 
   const card = 'rounded-2xl border border-slate-700/70 bg-[#202447]/85 shadow-[0_14px_36px_rgba(8,12,34,.18)]'
@@ -261,9 +322,9 @@ export function DataHub() {
         <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div><h2 id="upload-heading" className="flex items-center gap-2 text-base font-semibold"><Database size={17} className="text-[#72c6a3]" />{t('Source files', 'ملفات المصدر')}</h2>
             <p className="mt-1 text-xs text-slate-400">{t('CSV, XLS, XLSX or JSON · 25 MB each · 50 MB total · up to 10 files', 'CSV أو XLS أو XLSX أو JSON · 25 م.ب لكل ملف · 50 م.ب إجمالاً · حتى 10 ملفات')}</p></div>
-          <button type="button" onClick={() => inputRef.current?.click()} className="btn-ghost min-h-9 border border-slate-700/80"><Plus size={15} />{t('Choose files', 'اختيار الملفات')}</button>
+          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy !== null || forecastBusy || chatBusy} className="btn-ghost min-h-9 border border-slate-700/80"><Plus size={15} />{t('Choose files', 'اختيار الملفات')}</button>
         </div>
-        <input ref={inputRef} className="sr-only" type="file" multiple accept=".csv,.xls,.xlsx,.json" aria-label={t('Choose data files', 'اختيار ملفات البيانات')} onChange={onFileChange} />
+        <input ref={inputRef} className="sr-only" type="file" multiple accept=".csv,.xls,.xlsx,.json" aria-label={t('Choose data files', 'اختيار ملفات البيانات')} onChange={onFileChange} disabled={busy !== null || forecastBusy || chatBusy} />
         <div
           role="button" tabIndex={0} aria-label={t('Drop files here or press Enter to choose files', 'أسقط الملفات هنا أو اضغط إدخال لاختيار الملفات')}
           onClick={() => inputRef.current?.click()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); inputRef.current?.click() } }}
@@ -277,13 +338,13 @@ export function DataHub() {
         </div>
         {files.length > 0 && <div className="mt-3 space-y-2">{files.map((file, index) => <div key={`${file.name}-${file.lastModified}-${index}`} className="flex items-center gap-3 rounded-xl border border-slate-700/70 bg-[#171a34]/60 px-3 py-2.5">
           <FileSpreadsheet size={16} className="shrink-0 text-[#72c6a3]" /><span className="min-w-0 flex-1 truncate text-sm text-slate-200">{file.name}</span><span className="text-xs tabular-nums text-slate-500">{bytes(file.size, isAr)}</span>
-          <button type="button" onClick={() => removeFile(index)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-700 hover:text-white" aria-label={t(`Remove ${file.name}`, `إزالة ${file.name}`)}><X size={15} /></button>
+          <button type="button" onClick={() => removeFile(index)} disabled={busy !== null || forecastBusy || chatBusy} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-700 hover:text-white disabled:opacity-40" aria-label={t(`Remove ${file.name}`, `إزالة ${file.name}`)}><X size={15} /></button>
         </div>)}</div>}
         <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
           <div>
             <div className="mb-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">{t('Optional in-memory cleaning', 'تنظيف اختياري في الذاكرة')}</div>
             <div className="flex flex-wrap gap-x-4 gap-y-2">{CLEANING.map((option) => <label key={option.id} className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-300">
-              <input type="checkbox" className="h-3.5 w-3.5 accent-[#72c6a3]" checked={cleaning.includes(option.id)} onChange={() => toggleCleaning(option.id)} />
+              <input type="checkbox" className="h-3.5 w-3.5 accent-[#72c6a3]" checked={cleaning.includes(option.id)} onChange={() => toggleCleaning(option.id)} disabled={busy !== null || forecastBusy || chatBusy} />
               <span>{t(option.en, option.ar)} <span className="text-slate-500">· {t(option.noteEn, option.noteAr)}</span></span>
             </label>)}</div>
             <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-5 text-slate-500"><CircleHelp size={13} className="mt-0.5 shrink-0" />{t('Selected transformations apply only to a re-analyzed in-memory copy. Original files are unchanged.', 'تُطبّق التحويلات المحددة على نسخة داخل الذاكرة يعاد تحليلها فقط. لا تتغير الملفات الأصلية.')}</p>
@@ -333,10 +394,11 @@ export function DataHub() {
               {inspection.datasets.map((dataset) => <div key={dataset.id} className="rounded-xl border border-slate-700/70 bg-[#202447] p-3">
                 <div className="flex items-start justify-between gap-2"><div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-100" title={dataset.filename}>{dataset.filename}</div><div className="mt-1 truncate text-[11px] text-slate-500">{dataset.sheet || dataset.source_type}</div></div><span className="shrink-0 rounded-full border border-[#72c6a3]/20 bg-[#72c6a3]/10 px-2 py-1 text-[10px] font-semibold text-[#a8e2c7]">{number(dataset.quality_score)} / 100</span></div>
                 <div className="mt-3 grid grid-cols-3 gap-2 text-[10px]"><div><span className="block text-slate-500">{t('Rows', 'صفوف')}</span><b className="mt-1 block text-slate-200 tabular-nums">{number(dataset.analyzed_rows)}</b></div><div><span className="block text-slate-500">{t('Fields', 'حقول')}</span><b className="mt-1 block text-slate-200 tabular-nums">{number(dataset.column_count)}</b></div><div><span className="block text-slate-500">{t('Missing', 'مفقود')}</span><b className="mt-1 block text-slate-200 tabular-nums">{number(dataset.missing_percent)}%</b></div></div>
-                {(dataset.warnings.length > 0 || dataset.ingestion_transformations.length > 0 || dataset.applied_cleaning.length > 0) && <div className="mt-3 space-y-1 border-t border-slate-700/70 pt-2 text-[10px] text-amber-200/80">
+                 {(dataset.warnings.length > 0 || dataset.ingestion_transformations.length > 0 || dataset.applied_cleaning.length > 0 || dataset.cleaning_suggestions.length > 0) && <div className="mt-3 space-y-1 border-t border-slate-700/70 pt-2 text-[10px] text-amber-200/80">
                   {dataset.warnings.map((warning, index) => <p key={`warn-${index}`}>• {warning}</p>)}
                   {dataset.ingestion_transformations.map((item, index) => <p key={`transform-${index}`}>· {item}</p>)}
-                  {dataset.applied_cleaning.map((item, index) => <p key={`clean-${index}`} className="text-[#9bdac0]">✓ {item}</p>)}
+                   {dataset.applied_cleaning.map((item, index) => <p key={`clean-${index}`} className="text-[#9bdac0]">✓ {cleaningLabel(item.id, t)} · {number(item.changed)} {t('changes', 'تغييرات')}</p>)}
+                   {!!dataset.cleaning_suggestions.filter((item) => item.eligible === true || (typeof item.eligible === 'number' && item.eligible > 0)).length && <p className="text-slate-400">{t('Suggested review:', 'مراجعة مقترحة:')} {dataset.cleaning_suggestions.filter((item) => item.eligible === true || (typeof item.eligible === 'number' && item.eligible > 0)).map((item) => `${cleaningLabel(item.id, t)}${typeof item.eligible === 'number' ? ` (${number(item.eligible)})` : ''}`).join(' · ')}</p>}
                 </div>}
               </div>)}
             </div>
@@ -386,16 +448,18 @@ export function DataHub() {
                 <button type="submit" disabled={!forecastDate || forecastBusy} className={`${primaryButton} w-full xl:w-auto`}>{forecastBusy ? <LoaderCircle size={15} className="animate-spin" /> : <ArrowUpRight size={15} />}{t('Forecast', 'توقع')}</button>
               </form>
               {forecast && <div className="mt-5 rounded-xl border border-slate-700/70 bg-[#171a34]/55 p-3 sm:p-4">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-semibold text-slate-100">{forecast.filename} · {forecast.metric_column === '__rows__' ? t('Record count', 'عدد السجلات') : forecast.metric_column}</div><div className="mt-1 text-[10px] text-slate-500">{forecast.method} · {forecast.period_grain} · {number(forecast.observation_count)} {t('observations', 'مشاهدات')}</div></div><div className="text-[10px] text-slate-500">{t('Observed + forecast', 'فعلي + متوقع')}</div></div>
+                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-semibold text-slate-100">{forecast.filename} · {forecast.metric_column === '__rows__' ? t('Record count', 'عدد السجلات') : forecast.metric_column}</div><div className="mt-1 text-[10px] text-slate-500">{forecast.method} · {forecast.period_grain} · {number(forecast.observation_count)} {t('observations', 'مشاهدات')} · {t('Backtest MAE', 'متوسط الخطأ المطلق للاختبار')} {number(forecast.backtest_mae)} ({number(forecast.validation_periods)} {t('periods', 'فترات')})</div></div><div className="text-[10px] text-slate-500">{t('Observed + forecast', 'فعلي + متوقع')}</div></div>
                 <div className="h-64 w-full" role="img" aria-label={t('Chart of observed values and forecast with supplied interval', 'مخطط للقيم الفعلية والتوقع مع النطاق المقدم')}>
-                  <ResponsiveContainer width="100%" height="100%"><AreaChart data={[...forecast.observed.map((point) => ({ ...point, kind: 'observed' })), ...forecast.forecast.map((point) => ({ period: point.period, value: point.estimate, lower: point.lower, upper: point.upper, kind: 'forecast' }))]} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                  <ResponsiveContainer width="100%" height="100%"><AreaChart data={forecastChartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                     <defs><linearGradient id="forecastBand" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#72c6a3" stopOpacity={.24} /><stop offset="100%" stopColor="#72c6a3" stopOpacity={.025} /></linearGradient></defs>
                     <CartesianGrid stroke="#3b4264" strokeDasharray="3 5" vertical={false} />
                     <XAxis dataKey="period" tick={{ fill: '#929bb4', fontSize: 10 }} axisLine={{ stroke: '#3b4264' }} tickLine={false} />
                     <YAxis tick={{ fill: '#929bb4', fontSize: 10 }} axisLine={false} tickLine={false} width={48} />
                     <Tooltip contentStyle={{ background: '#202447', border: '1px solid #3b4264', borderRadius: 12, color: '#f2f3f8', fontSize: 12 }} formatter={(value: number, name: string) => [number(value), name]} />
-                    {forecast.forecast.length > 0 && <ReferenceArea x1={forecast.forecast[0].period} x2={forecast.forecast[forecast.forecast.length - 1].period} y1={Math.min(...forecast.forecast.map((point) => point.lower))} y2={Math.max(...forecast.forecast.map((point) => point.upper))} fill="#72c6a3" fillOpacity={.09} strokeOpacity={0} />}
-                    <Area type="monotone" dataKey="value" stroke="#72c6a3" strokeWidth={2.5} fill="url(#forecastBand)" connectNulls dot={{ fill: '#72c6a3', stroke: '#202447', strokeWidth: 2, r: 3 }} activeDot={{ r: 5 }} />
+                    <Area type="monotone" dataKey="lower" stackId="interval" stroke="transparent" fill="transparent" connectNulls />
+                    <Area type="monotone" dataKey="interval" stackId="interval" stroke="transparent" fill="url(#forecastBand)" connectNulls />
+                    <Line type="monotone" dataKey="observed" name={t('Observed', 'فعلي')} stroke="#9db8df" strokeWidth={2.25} connectNulls={false} dot={{ fill: '#9db8df', stroke: '#202447', strokeWidth: 2, r: 3 }} />
+                    <Line type="monotone" dataKey="estimate" name={t('Forecast', 'توقع')} stroke="#72c6a3" strokeWidth={2.5} strokeDasharray="6 4" connectNulls={false} dot={{ fill: '#72c6a3', stroke: '#202447', strokeWidth: 2, r: 3 }} activeDot={{ r: 5 }} />
                   </AreaChart></ResponsiveContainer>
                 </div>
                 {forecast.limitations.length > 0 && <div className="mt-3 border-t border-slate-700/70 pt-3"><div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-amber-200">{t('Limitations', 'القيود')}</div><ul className="space-y-1 text-xs leading-5 text-slate-400">{forecast.limitations.map((item, index) => <li key={index}>· {item}</li>)}</ul></div>}
@@ -409,7 +473,7 @@ export function DataHub() {
               {turns.length === 0 && <div className="rounded-xl border border-dashed border-slate-700 px-4 py-6 text-center text-xs text-slate-500">{t('Your questions and grounded summaries will appear here.', 'ستظهر أسئلتك والملخصات المستندة إلى البيانات هنا.')}</div>}
               {turns.map((turn, index) => <div key={`${index}-${turn.question}`} className="space-y-2">
                 <div className="ms-auto max-w-[90%] rounded-2xl rounded-ee-sm bg-[#2e3070] px-4 py-3 text-sm text-white">{turn.question}</div>
-                {turn.loading && <div className="flex items-center gap-2 text-xs text-slate-400"><LoaderCircle size={14} className="animate-spin" />{t('Analyzing locally…', 'جارٍ التحليل محلياً…')}</div>}
+                 {turn.loading && <div className="flex items-center gap-2 text-xs text-slate-400"><LoaderCircle size={14} className="animate-spin" />{progressText(extractionProgress ?? { stage: 'starting' })}</div>}
                 {turn.error && <div role="alert" className="rounded-xl border border-rose-400/20 bg-rose-950/20 p-3 text-xs text-rose-200">{turn.error}</div>}
                 {turn.result?.answer && <div className="rounded-2xl rounded-ss-sm border border-slate-700 bg-[#171a34]/75 p-4">
                   <p className="whitespace-pre-wrap text-sm leading-6 text-slate-200">{turn.result.answer.answer_text || t('No answer text was returned.', 'لم يتم إرجاع نص للإجابة.')}</p>

@@ -175,4 +175,4 @@ export type Theme = 'dark' | 'light'
 // 'executive-report-preview' removed — all confirmed dependents of
 // employee_risk_scoring.py and its shared upload/session pipeline, removed
 // this phase. 'overview' (EnterpriseOverview.tsx) is the new default page.
-export type NavPage = 'overview' | 'trust' | 'overtime' | 'payroll' | 'exitinterview' | 'recruitment' | 'fairness' | 'payequity' | 'nitaqat' | 'succession' | 'contractexpiry' | 'jobpatterns' | 'laborlaw' | 'hrletters' | 'gosi' | 'payrollbudget' | 'zakat' | 'financialintelligence' | 'accountingintelligence' | 'inventoryintelligence' | 'procurementintelligence' | 'logisticsintelligence' | 'operationsintelligence' | 'aibusinessanalyst'
+export type NavPage = 'overview' | 'trust' | 'overtime' | 'payroll' | 'exitinterview' | 'recruitment' | 'fairness' | 'payequity' | 'nitaqat' | 'succession' | 'contractexpiry' | 'jobpatterns' | 'laborlaw' | 'hrletters' | 'gosi' | 'payrollbudget' | 'zakat' | 'financialintelligence' | 'accountingintelligence' | 'inventoryintelligence' | 'procurementintelligence' | 'logisticsintelligence' | 'operationsintelligence' | 'aibusinessanalyst' | 'datahub'

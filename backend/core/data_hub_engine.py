@@ -9,8 +9,8 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import asdict
-from datetime import date, timedelta
 from pathlib import Path
+from datetime import timedelta
 from typing import Any, Iterable
 
 import numpy as np
@@ -229,15 +229,17 @@ def _payroll_checks(frame: pd.DataFrame, sensitive: set[str]) -> list[dict[str, 
 
 def _compliance_checks(frame: pd.DataFrame) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(pd.Timestamp.now(tz="Asia/Riyadh").date())
     for column in frame.columns:
         if not _EXPIRY_NAME.search(str(column)):
             continue
         dates = _parse_dates(frame[column]).dropna()
         if dates.empty:
             continue
+        if isinstance(dates.dtype, pd.DatetimeTZDtype):
+            dates = dates.dt.tz_localize(None)
         expired = int((dates.dt.normalize() < today).sum())
-        due_soon = int(((dates.dt.normalize() >= today) & (dates.dt.normalize() <= today + pd.Timedelta(days=30))).sum())
+        due_soon = int(((dates.dt.normalize() >= today) & (dates.dt.normalize() <= today + timedelta(days=30))).sum())
         if expired or due_soon:
             checks.append({
                 "id": "compliance_expiry",
@@ -262,7 +264,7 @@ def profile_frame(
 ) -> dict[str, Any]:
     scanner = SecureFileIngestion()
     cleaned, applied, counts = apply_cleaning(frame, cleaning_options)
-    numeric_columns: list[dict[str, Any]] = []
+    numeric_columns: list[str] = []
     date_columns: list[str] = []
     columns: list[dict[str, Any]] = []
     anomalies: list[dict[str, Any]] = []
@@ -304,7 +306,7 @@ def profile_frame(
                     "std": _finite(valid.std()) if len(valid) > 1 else None,
                 }
                 entry["outlier_count"] = outliers
-                numeric_columns.append({"name": name, "sensitive": False})
+                numeric_columns.append(name)
                 if outliers:
                     rate = outliers * 100 / max(len(valid), 1)
                     anomalies.append({
@@ -322,7 +324,6 @@ def profile_frame(
             else:
                 entry["numeric_summary"] = None
                 entry["outlier_count"] = None
-                numeric_columns.append({"name": name, "sensitive": True})
         columns.append(entry)
 
     anomalies.extend(_payroll_checks(cleaned, sensitive_columns))
@@ -429,6 +430,8 @@ def forecast_frame(
             raise ValueError("Forecasts are disabled for columns identified as personal or post-event data.")
 
     dates = _parse_dates(frame[date_column])
+    if isinstance(dates.dtype, pd.DatetimeTZDtype):
+        dates = dates.dt.tz_localize(None)
     values = pd.Series(1.0, index=frame.index) if metric_column == "__rows__" else _clean_numeric(frame[metric_column])
     valid = dates.notna() & values.notna()
     if not valid.any():
@@ -449,34 +452,60 @@ def forecast_frame(
             f"At least 8 monthly observations are required for a trend projection; found {len(monthly)}."
         )
 
-    # Fit a transparent linear trend against calendar-month offsets. No seasonality,
-    # causal factors, or external data are inferred.
-    x = np.array([p.ordinal - monthly.index[0].ordinal for p in monthly.index], dtype=float)
     y = monthly.to_numpy(dtype=float)
-    slope, intercept = np.polyfit(x, y, 1)
-    fitted = intercept + slope * x
-    residuals = y - fitted
-    dof = len(y) - 2
-    residual_se = float(np.sqrt(np.sum(residuals ** 2) / dof)) if dof > 0 else 0.0
-    sxx = float(np.sum((x - x.mean()) ** 2))
-    try:
-        from scipy.stats import t as student_t
-        critical = float(student_t.ppf(0.975, dof)) if dof > 0 else 1.96
-    except Exception:
-        critical = 1.96
+    periods = list(monthly.index)
 
-    last_ordinal = monthly.index[-1].ordinal
+    def predict(model: str, train_periods: list[pd.Period], train_values: np.ndarray, target: pd.Period) -> float:
+        if model == "seasonal_naive":
+            prior_year = target - 12
+            prior = next(
+                (value for period, value in zip(train_periods, train_values) if period == prior_year),
+                None,
+            )
+            if prior is not None:
+                return float(prior)
+        if model == "linear_trend" and len(train_values) >= 2:
+            offsets = np.array([period.ordinal - train_periods[0].ordinal for period in train_periods], dtype=float)
+            slope, intercept = np.polyfit(offsets, train_values, 1)
+            return float(intercept + slope * (target.ordinal - train_periods[0].ordinal))
+        return float(train_values[-1])
+
+    # Select among transparent local baselines using one-step rolling-origin
+    # validation. Seasonal-naive is offered only when enough history exists.
+    min_train = max(4, min(12, len(y) - 2))
+    candidate_models = ["naive", "linear_trend"]
+    if len(y) >= 18:
+        candidate_models.append("seasonal_naive")
+    errors_by_model: dict[str, list[float]] = {model: [] for model in candidate_models}
+    for origin in range(min_train, len(y)):
+        for model in candidate_models:
+            estimate = predict(model, periods[:origin], y[:origin], periods[origin])
+            errors_by_model[model].append(float(y[origin] - estimate))
+    model_order = {model: index for index, model in enumerate(candidate_models)}
+    model_mae = {
+        model: float(np.mean(np.abs(errors)))
+        for model, errors in errors_by_model.items()
+        if errors
+    }
+    selected_model = min(model_mae, key=lambda model: (model_mae[model], model_order[model]))
+    validation_errors = np.asarray(errors_by_model[selected_model], dtype=float)
+    backtest_rmse = float(np.sqrt(np.mean(validation_errors ** 2))) if len(validation_errors) else 0.0
+    # A non-zero scale floor prevents a short, exactly linear sample from
+    # presenting false certainty through a zero-width interval.
+    scale_floor = max(float(np.median(np.abs(y))) * 0.05, 1e-6)
+    error_scale = max(backtest_rmse, scale_floor)
+
     projection: list[dict[str, Any]] = []
     for offset in range(1, int(horizon) + 1):
-        x_next = last_ordinal + offset - monthly.index[0].ordinal
-        estimate = float(intercept + slope * x_next)
-        prediction_se = residual_se * float(np.sqrt(1 + 1 / len(y) + ((x_next - x.mean()) ** 2 / sxx if sxx > 0 else 0)))
-        margin = critical * prediction_se
         period = monthly.index[-1] + offset
+        estimate = predict(selected_model, periods, y, period)
+        margin = 1.96 * error_scale * float(np.sqrt(offset))
+        if metric_column == "__rows__" or aggregation == "count":
+            estimate = max(0.0, estimate)
         projection.append({
             "period": str(period),
             "estimate": _finite(estimate),
-            "lower": _finite(estimate - margin),
+            "lower": _finite(max(0.0, estimate - margin) if metric_column == "__rows__" or aggregation == "count" else estimate - margin),
             "upper": _finite(estimate + margin),
         })
 
@@ -484,16 +513,20 @@ def forecast_frame(
         "filename": Path(filename).name[:_SAFE_LABEL_LIMIT],
         "sheet": str(sheet)[:_SAFE_LABEL_LIMIT],
         "date_column": date_column[:_SAFE_LABEL_LIMIT],
-        "metric_column": "Record count" if metric_column == "__rows__" else metric_column[:_SAFE_LABEL_LIMIT],
+        "metric_column": metric_column if metric_column == "__rows__" else metric_column[:_SAFE_LABEL_LIMIT],
         "aggregation": aggregation,
         "period_grain": "month",
-        "method": "Ordinary least-squares linear trend with an approximate 95% prediction interval",
+        "method": f"Rolling-origin model selection ({selected_model.replace('_', ' ')}) with widening empirical error bounds",
+        "selected_model": selected_model,
+        "backtest_mae": _finite(model_mae[selected_model]),
+        "validation_periods": len(validation_errors),
         "observation_count": int(len(monthly)),
         "observed": [{"period": str(period), "value": _finite(value)} for period, value in monthly.items()],
         "forecast": projection,
         "limitations": [
-            "Exploratory trend projection only; it does not model seasonality, causal drivers, or future policy changes.",
-            "Prediction intervals assume independent, approximately stable residuals and are not a guarantee.",
+            "The model is selected using a short one-step rolling-origin backtest; selection may be unstable with limited history.",
+            "Bounds are approximate empirical error ranges with a non-zero scale floor, not guarantees or calibrated probabilities.",
+            "The models do not incorporate causal drivers, operational constraints, or future policy changes.",
             "Validate against domain knowledge before using in workforce or financial decisions.",
         ],
     }
@@ -562,6 +595,7 @@ def build_summary_xlsx(profiles: list[dict[str, Any]]) -> bytes:
 def build_summary_pdf(profiles: list[dict[str, Any]], language: str = "en") -> bytes:
     try:
         from fpdf import FPDF
+        from fpdf.enums import XPos, YPos
     except ImportError as exc:
         raise RuntimeError("PDF export is unavailable because fpdf2 is not installed.") from exc
 
@@ -591,7 +625,14 @@ def build_summary_pdf(profiles: list[dict[str, Any]], language: str = "en") -> b
             pdf.set_text_shaping(use_shaping_engine=True, direction="rtl", script="arab", language="ara")
         else:
             pdf.set_text_shaping(use_shaping_engine=False)
-        pdf.multi_cell(0, height, text=str(text)[:800], align="R" if is_ar else "L")
+        pdf.multi_cell(
+            w=pdf.epw,
+            h=height,
+            text=str(text)[:800],
+            align="R" if is_ar else "L",
+            new_x=XPos.LMARGIN,
+            new_y=YPos.NEXT,
+        )
 
     write(title, bold=True, size=17, height=12)
     write(

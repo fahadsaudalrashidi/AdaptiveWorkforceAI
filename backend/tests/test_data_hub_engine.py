@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import io
 import unittest
-from datetime import datetime
+from datetime import timedelta
 
 import pandas as pd
 from openpyxl import load_workbook
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from backend.api.data_hub_routes import create_data_hub_router
 from backend.core.data_hub_engine import (
     apply_cleaning,
     build_summary_pdf,
     build_summary_xlsx,
+    _clean_numeric,
     forecast_frame,
     profile_frame,
 )
@@ -31,7 +35,7 @@ class DataHubProfileTests(unittest.TestCase):
         self.assertEqual(result["source_rows"], 10)
         self.assertEqual(cost["outlier_count"], 1)
         self.assertEqual(name["sensitive"], True)
-        self.assertIsNone(name["numeric_summary"])
+        self.assertNotIn("numeric_summary", name)
         self.assertFalse(any("Person" in str(value) for value in result.values()))
         self.assertEqual(result["anomalies"][0]["method"], "Tukey IQR fence (1.5 × IQR)")
 
@@ -54,6 +58,18 @@ class DataHubProfileTests(unittest.TestCase):
             "trim_text", "remove_blank_rows", "remove_blank_columns", "remove_exact_duplicates"
         })
 
+    def test_expiry_flags_use_the_saudi_local_calendar_and_aggregate_counts(self):
+        today = pd.Timestamp(pd.Timestamp.now(tz="Asia/Riyadh").date())
+        frame = pd.DataFrame({
+            "Iqama Expiry": [today - timedelta(days=1), today + timedelta(days=5),
+                             today + timedelta(days=45), pd.NaT],
+        })
+        profile = profile_frame(frame, filename="visas.csv", sheet="Data")
+        expiry = next(anomaly for anomaly in profile["anomalies"] if anomaly["kind"] == "compliance")
+        self.assertEqual(expiry["expired"], 1)
+        self.assertEqual(expiry["due_30_days"], 1)
+        self.assertEqual(expiry["evaluated"], 3)
+
     def test_monthly_forecast_has_observed_and_intervals(self):
         frame = pd.DataFrame({
             "Month": pd.date_range("2025-01-01", periods=12, freq="MS"),
@@ -73,9 +89,29 @@ class DataHubProfileTests(unittest.TestCase):
         self.assertEqual(result["observation_count"], 12)
         self.assertEqual(result["forecast"][0]["period"], "2026-01")
         self.assertAlmostEqual(result["forecast"][0]["estimate"], 220, places=5)
-        self.assertLessEqual(result["forecast"][0]["lower"], result["forecast"][0]["estimate"])
-        self.assertGreaterEqual(result["forecast"][0]["upper"], result["forecast"][0]["estimate"])
+        self.assertEqual(result["selected_model"], "linear_trend")
+        self.assertLess(result["forecast"][0]["lower"], result["forecast"][0]["estimate"])
+        self.assertGreater(result["forecast"][0]["upper"], result["forecast"][0]["estimate"])
         self.assertTrue(result["limitations"])
+
+    def test_forecast_selects_seasonal_baseline_when_backtesting_supports_it(self):
+        values = [20 + (month % 12) * 5 for month in range(30)]
+        frame = pd.DataFrame({
+            "Month": pd.date_range("2023-01-01", periods=30, freq="MS"),
+            "Demand": values,
+        })
+        result = forecast_frame(
+            frame,
+            filename="demand.csv",
+            sheet="Data",
+            date_column="Month",
+            metric_column="Demand",
+            aggregation="mean",
+            horizon=2,
+        )
+        self.assertEqual(result["selected_model"], "seasonal_naive")
+        self.assertEqual(result["validation_periods"], 18)
+        self.assertAlmostEqual(result["forecast"][0]["estimate"], values[-12], places=5)
 
     def test_forecast_rejects_sensitive_measure_and_short_history(self):
         frame = pd.DataFrame({
@@ -113,6 +149,64 @@ class DataHubProfileTests(unittest.TestCase):
             pdf = build_summary_pdf([profile], language)
             self.assertTrue(pdf.startswith(b"%PDF-"))
             self.assertGreater(len(pdf), 1000)
+
+    def test_numeric_parser_does_not_extract_digits_from_labels(self):
+        parsed = _clean_numeric(pd.Series(["Person 2026", "SAR 1,234.50", "٣٬٥٠٠٫٥٠", "(25.5)"]))
+        self.assertTrue(pd.isna(parsed.iloc[0]))
+        self.assertAlmostEqual(parsed.iloc[1], 1234.5)
+        self.assertAlmostEqual(parsed.iloc[2], 3500.5)
+        self.assertAlmostEqual(parsed.iloc[3], -25.5)
+
+    def test_authenticated_data_hub_inspection_and_forecast_routes(self):
+        router = create_data_hub_router()
+        app = FastAPI()
+        app.dependency_overrides[router.dependencies[0].dependency] = lambda: None
+        app.include_router(router)
+        client = TestClient(app)
+        csv = (
+            "Month,Operating Budget,Employee Name\n"
+            "2025-01-01,100,Private One\n"
+            "2025-02-01,110,Private Two\n"
+            "2025-03-01,120,Private Three\n"
+            "2025-04-01,130,Private Four\n"
+            "2025-05-01,140,Private Five\n"
+            "2025-06-01,150,Private Six\n"
+            "2025-07-01,160,Private Seven\n"
+            "2025-08-01,170,Private Eight\n"
+        ).encode()
+        inspect_response = client.post(
+            "/api/local/data-hub/inspect",
+            files=[("files", ("budget.csv", csv, "text/csv"))],
+            data={"cleaning_options": "[]"},
+        )
+        self.assertEqual(inspect_response.status_code, 200, inspect_response.text)
+        payload = inspect_response.json()
+        self.assertTrue(payload["privacy"]["persisted"] is False)
+        self.assertNotIn("Private One", inspect_response.text)
+        self.assertEqual(payload["datasets"][0]["date_columns"], ["Month"])
+
+        forecast_response = client.post(
+            "/api/local/data-hub/forecast",
+            files={"file": ("budget.csv", csv, "text/csv")},
+            data={
+                "sheet": "Data",
+                "date_column": "Month",
+                "metric_column": "Operating Budget",
+                "aggregation": "sum",
+                "horizon": "2",
+            },
+        )
+        self.assertEqual(forecast_response.status_code, 200, forecast_response.text)
+        self.assertEqual(forecast_response.json()["observation_count"], 8)
+
+    def test_data_hub_routes_require_authentication_by_default(self):
+        app = FastAPI()
+        app.include_router(create_data_hub_router())
+        response = TestClient(app).post(
+            "/api/local/data-hub/inspect",
+            files=[("files", ("budget.csv", b"Month,Cost\n2025-01,10\n", "text/csv"))],
+        )
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

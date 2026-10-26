@@ -25,6 +25,7 @@ import {
   Truck,
   Ship,
   Factory,
+  Database,
 } from 'lucide-react'
 import { useLanguage } from '../context/LanguageContext'
 import type { NavPage } from '../types'
@@ -83,6 +84,15 @@ const NAV_GROUPS: NavGroup[] = [
     groupEn: 'AI & Business Intelligence',
     groupAr: 'الذكاء الاصطناعي وذكاء الأعمال',
     items: [
+      {
+        id: 'datahub',
+        icon: Database,
+        labelEn: 'Interactive Data Hub',
+        labelAr: 'مركز البيانات التفاعلي',
+        descEn: 'Inspect, clean and forecast local files',
+        descAr: 'افحص ونظّف وتوقّع من الملفات المحلية',
+        badge: 'new',
+      },
       {
         id: 'aibusinessanalyst',
         icon: Bot,

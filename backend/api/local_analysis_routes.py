@@ -3533,7 +3533,7 @@ def create_local_analysis_router() -> Any:
 
     @router.post(
         "/ai-business-analyst/agentic",
-        dependencies=[Depends(require_role(AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.SYSTEM_ADMIN))],
+        dependencies=[Depends(require_role(AWIRole.EXECUTIVE, AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.SYSTEM_ADMIN))],
     )
     async def local_ai_business_analyst_agentic(
         question: str = Form(...),
@@ -3735,7 +3735,7 @@ def create_local_analysis_router() -> Any:
 
     @router.post(
         "/ai-business-analyst/agentic/stream",
-        dependencies=[Depends(require_role(AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.SYSTEM_ADMIN))],
+        dependencies=[Depends(require_role(AWIRole.EXECUTIVE, AWIRole.CHRO, AWIRole.HR_MANAGER, AWIRole.SYSTEM_ADMIN))],
     )
     async def local_ai_business_analyst_stream(
         question: str = Form(...),

@@ -33,6 +33,7 @@ import type { AuthUser } from './auth/authClient'
 // Suspense/PageLoader boundary handles loading and the page boundary errors.
 const AIBusinessAnalyst = lazy(() => import('./pages/AIBusinessAnalyst').then(module => ({ default: module.AIBusinessAnalyst })))
 const AccountingIntelligence = lazy(() => import('./pages/AccountingIntelligence').then(module => ({ default: module.AccountingIntelligence })))
+const DataHub = lazy(() => import('./pages/DataHub').then(module => ({ default: module.DataHub })))
 
 function PageLoader() {
   return (
@@ -98,6 +99,8 @@ function AppContent({ user, onSignOut }: { user: AuthUser; onSignOut: () => Prom
         return <OperationsIntelligence />
       case 'aibusinessanalyst':
         return <AIBusinessAnalyst />
+      case 'datahub':
+        return <DataHub />
     }
   }
 

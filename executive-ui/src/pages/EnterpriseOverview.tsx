@@ -20,7 +20,7 @@
  */
 import { motion } from 'framer-motion'
 import {
-  Bot, LineChart, BookOpen, Package, Truck, Ship, Factory,
+  Bot, LineChart, BookOpen, Package, Truck, Ship, Factory, Database,
   Clock, Wallet, Calculator, MessageSquare, UserPlus, Briefcase,
   Scale, Coins, Flag, TrendingUp, CalendarClock, Gavel, Landmark,
   Mail, HandCoins, ArrowRight,
@@ -49,6 +49,7 @@ const SECTIONS: ModuleSection[] = [
     labelEn: 'AI & Business Intelligence',
     labelAr: 'الذكاء الاصطناعي وذكاء الأعمال',
     cards: [
+      { id: 'datahub', icon: Database, titleEn: 'Interactive Data Hub', titleAr: 'مركز البيانات التفاعلي', descEn: 'Inspect, clean and forecast local files', descAr: 'افحص ونظّف وتوقّع من الملفات المحلية' },
       { id: 'aibusinessanalyst', icon: Bot, titleEn: 'AI Business Analyst', titleAr: 'المحلل التجاري الذكي', descEn: 'Ask questions over your data — local & offline', descAr: 'اطرح أسئلة على بياناتك — محلي وغير متصل' },
       { id: 'financialintelligence', icon: LineChart, titleEn: 'Financial Intelligence', titleAr: 'الذكاء المالي', descEn: 'Revenue, expense, P&L, cash flow', descAr: 'الإيرادات والمصروفات والأرباح والتدفق النقدي' },
       { id: 'accountingintelligence', icon: BookOpen, titleEn: 'Accounting Intelligence', titleAr: 'الذكاء المحاسبي', descEn: 'General ledger, trial balance, AR/AP aging', descAr: 'دفتر الأستاذ وميزان المراجعة وأعمار الذمم' },

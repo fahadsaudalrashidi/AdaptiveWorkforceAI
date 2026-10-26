@@ -2,7 +2,7 @@ modules = ["python-3.12", "nodejs-20", "web", "postgresql-16"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["arrow-cpp", "cargo", "dejavu_fonts", "glibcLocales", "libiconv", "libxcrypt", "ocl-icd", "openssl", "pkg-config", "postgresql", "rapidfuzz-cpp", "rustc", "taskflow", "tesseract", "xsimd"]
+packages = ["dejavu_fonts", "glibcLocales", "libiconv", "libxcrypt", "ocl-icd", "openssl", "postgresql", "tesseract"]
 
 [agent]
 expertMode = true
