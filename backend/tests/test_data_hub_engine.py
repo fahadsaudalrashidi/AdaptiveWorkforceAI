@@ -72,6 +72,21 @@ class DataHubProfileTests(unittest.TestCase):
         self.assertEqual(expiry["due_30_days"], 1)
         self.assertEqual(expiry["evaluated"], 3)
 
+    def test_temporal_cost_spikes_compare_against_rolling_local_baseline(self):
+        frame = pd.DataFrame({
+            "Month": pd.date_range("2025-01-01", periods=12, freq="MS"),
+            "Operating Cost": [100] * 11 + [220],
+        })
+        profile = profile_frame(frame, filename="costs.csv", sheet="Data")
+        spikes = [
+            anomaly for anomaly in profile["anomalies"]
+            if anomaly["kind"] == "temporal_cost_spike"
+        ]
+        self.assertEqual(len(spikes), 1)
+        self.assertEqual(spikes[0]["periods"], ["2025-12"])
+        self.assertEqual(spikes[0]["count"], 1)
+        self.assertIn("MAD", spikes[0]["method"])
+
     def test_monthly_forecast_has_observed_and_intervals(self):
         frame = pd.DataFrame({
             "Month": pd.date_range("2025-01-01", periods=12, freq="MS"),
@@ -141,6 +156,19 @@ class DataHubProfileTests(unittest.TestCase):
         self.assertNotIn("Secret Division", values)
         workbook.close()
 
+    def test_arabic_workbook_export_localizes_tabs_and_supports_rtl(self):
+        profile = profile_frame(
+            pd.DataFrame({"Department": ["Operations"] * 10, "Budget": list(range(10))}),
+            filename="budget.csv",
+            sheet="Data",
+        )
+        workbook = load_workbook(io.BytesIO(build_summary_xlsx([profile], language="ar")), read_only=False)
+        self.assertEqual(workbook.sheetnames[0], "نظرة عامة")
+        self.assertEqual(workbook["نظرة عامة"]["A1"].value, "THRIVE — ملخص مركز البيانات")
+        self.assertTrue(workbook["نظرة عامة"].sheet_view.rightToLeft)
+        self.assertEqual(workbook["ملف البيانات"]["A1"].value, "الملف")
+        workbook.close()
+
     def test_pdf_export_is_a_valid_document_in_both_languages(self):
         profile = profile_frame(
             pd.DataFrame({"Department": ["Operations"] * 10, "Budget": list(range(10))}),
@@ -200,6 +228,16 @@ class DataHubProfileTests(unittest.TestCase):
         )
         self.assertEqual(forecast_response.status_code, 200, forecast_response.text)
         self.assertEqual(forecast_response.json()["observation_count"], 8)
+
+        export_response = client.post(
+            "/api/local/data-hub/export.xlsx",
+            files=[("files", ("budget.csv", csv, "text/csv"))],
+            data={"language": "ar", "cleaning_options": "[]"},
+        )
+        self.assertEqual(export_response.status_code, 200, export_response.text)
+        exported = load_workbook(io.BytesIO(export_response.content), read_only=True, data_only=True)
+        self.assertIn("نظرة عامة", exported.sheetnames)
+        exported.close()
 
     def test_data_hub_routes_require_authentication_by_default(self):
         app = FastAPI()
@@ -262,6 +300,16 @@ class WorkforceScenarioTests(unittest.TestCase):
         self.assertEqual(result["baseline"]["groups"], [])
         self.assertEqual(result["baseline"]["headcount"], 14)
         self.assertTrue(any("fewer than five" in item for item in result["limitations"]))
+
+    def test_department_details_are_available_at_the_five_person_threshold(self):
+        result = self.build(frame=pd.DataFrame({
+            "Department": ["Operations", "Finance"],
+            "Headcount": [10, 5],
+            "Annual Payroll": [100_000, 50_000],
+            "Overtime Cost": [5_000, 2_500],
+        }))
+        self.assertFalse(result["baseline"]["group_details_withheld"])
+        self.assertEqual(len(result["baseline"]["groups"]), 2)
 
     def test_totals_only_comparison_does_not_require_a_department_dimension(self):
         result = workforce_scenario_frame(

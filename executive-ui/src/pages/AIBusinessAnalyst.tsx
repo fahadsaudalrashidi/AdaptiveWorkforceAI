@@ -485,7 +485,7 @@ export function AIBusinessAnalyst() {
             </span>
           ))}
           <label className="text-xs flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-dashed border-slate-300 dark:border-slate-600 text-slate-500 cursor-pointer hover:border-blue-400">
-            <input ref={fileInputRef} type="file" multiple accept=".xlsx,.xls,.csv,.parquet,.json,.pdf" onChange={handleFileSelect} className="hidden" />
+            <input ref={fileInputRef} type="file" multiple accept=".xlsx,.xls,.csv,.parquet,.json,.jsonl,.pdf" onChange={handleFileSelect} className="hidden" />
             <Upload size={12} />{t('Add file(s)', 'إضافة ملف')}
           </label>
         </div>

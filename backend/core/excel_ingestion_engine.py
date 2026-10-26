@@ -78,7 +78,7 @@ class ExcelIngestionEngine:
         result = engine.ingest(raw_bytes, filename)
     """
 
-    SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv", ".parquet", ".json", ".pdf"}
+    SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".csv", ".parquet", ".json", ".jsonl", ".pdf"}
 
     def ingest(self, raw_bytes: bytes, filename: str, progress=None) -> IngestionResult:
         suffix = Path(filename).suffix.lower()
@@ -111,6 +111,8 @@ class ExcelIngestionEngine:
                 return self._load_parquet(raw_bytes)
             elif suffix == ".json":
                 return self._load_json(raw_bytes)
+            elif suffix == ".jsonl":
+                return self._load_jsonl(raw_bytes)
         except Exception as exc:
             logger.exception("Ingestion failed for %s", filename)
             return IngestionResult(
@@ -423,6 +425,34 @@ class ExcelIngestionEngine:
                 error=f"Cannot parse JSON: {exc}",
             )
         return self._finalize_from_df(df, sheet_used=None, warnings=[], transformations=transformations, encoding_used="utf-8")
+
+    def _load_jsonl(self, raw_bytes: bytes) -> IngestionResult:
+        """Read newline-delimited JSON records without guessing mixed row shapes."""
+        try:
+            text = raw_bytes.decode("utf-8-sig")
+            records: list[dict[str, Any]] = []
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"JSON Lines record at line {line_number} must be an object.")
+                records.append(value)
+            if not records:
+                raise ValueError("JSON Lines file contains no records.")
+            frame = pd.json_normalize(records, sep=".")
+        except Exception as exc:
+            return IngestionResult(
+                success=False, df=None, row_count=0, column_count=0,
+                original_headers=[], normalized_headers=[], detected_language="unknown",
+                detected_erp_style=None, encoding_used="utf-8", sheet_used="Data",
+                error=f"Cannot parse JSON Lines: {exc}",
+            )
+        return self._finalize_from_df(
+            frame, sheet_used="Data", warnings=[],
+            transformations=["Loaded newline-delimited JSON records", "Flattened nested JSON fields"],
+            encoding_used="utf-8",
+        )
 
     @staticmethod
     def _collect_json_record_lists(value: Any, path: str = "$") -> list[tuple[str, list[dict[str, Any]]]]:

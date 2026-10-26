@@ -209,7 +209,7 @@ def _natural_category_filters(
     )
     raw_words = set(_TOKEN.findall(question.lower()))
     grouping_intent = bool(asked & (_GROUP_TERMS - {"by", "per", "each"})) or bool(
-        raw_words & {"by", "per", "each"}
+        raw_words & {"by", "per", "each", "حسب", "لكل", "كل"}
     )
     explicit_filter_cue = bool(
         raw_words & {"for", "in", "where", "only", "with", "في", "لدى", "فقط"}
@@ -425,7 +425,7 @@ def analyze_local_question(
     )
     has_aggregation_intent = bool(
         (q_tokens & aggregate_words)
-        or (raw_tokens & {"by", "per", "each", "group", "grouped", "trend", "حسب", "لكل"})
+        or (raw_tokens & {"by", "per", "each", "group", "grouped", "trend", "حسب", "لكل", "كل"})
         or financial_question
     )
     if has_aggregation_intent and not is_document_request and any(
@@ -590,7 +590,21 @@ def analyze_local_question(
             ),
             "", "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
-    if re.search(r"\b(where|only)\b|فقط", q, re.I) and not category_filters:
+    explicit_filter_request = bool(re.search(r"\b(where|only|for|in|with)\b|فقط|في|لدى", q, re.I))
+    grouping_request = bool(re.search(r"\b(by|per|each|group|grouped)\b|حسب|لكل|كل", q, re.I))
+    source_clause = re.search(r"\b(?:in|from)\s+([^\s,?.]+)", q, re.I)
+    source_selected = bool(
+        source_clause
+        and _tokens(source_clause.group(1)) & _tokens(filename)
+        and (
+            re.search(r"\.(?:csv|xlsx?|jsonl?|pdf|parquet)$", source_clause.group(1), re.I)
+            or "$." in filename
+            or " — " in filename
+        )
+        and not category_filters
+    )
+    explicit_filter_request = explicit_filter_request and not source_selected
+    if explicit_filter_request and not category_filters and not grouping_request:
         categories = [
             column for column in safe_columns
             if column not in numeric_columns and frame[column].nunique(dropna=True) <= 50
@@ -645,6 +659,9 @@ def analyze_local_question(
         )
 
     average_intent = bool(q_tokens & _AVERAGE_TERMS)
+    top_intent = bool(q_tokens & _TOP_TERMS)
+    bottom_intent = bool(q_tokens & _BOTTOM_TERMS)
+    trend_intent = bool(q_tokens & _TREND_TERMS)
     sum_intent = (
         bool(q_tokens & _SUM_TERMS)
         or bool(raw_tokens & {"how", "much"})
@@ -654,12 +671,9 @@ def analyze_local_question(
             and not any((count_intent, average_intent, top_intent, bottom_intent, trend_intent))
         )
     )
-    top_intent = bool(q_tokens & _TOP_TERMS)
-    bottom_intent = bool(q_tokens & _BOTTOM_TERMS)
-    trend_intent = bool(q_tokens & _TREND_TERMS)
     by_intent = (
         bool(q_tokens & (_GROUP_TERMS - {"by", "per", "each"}))
-        or bool(raw_tokens & {"by", "per", "each"})
+        or bool(raw_tokens & {"by", "per", "each", "حسب", "لكل", "كل"})
         or trend_intent
     )
 

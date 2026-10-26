@@ -3512,7 +3512,7 @@ def create_local_analysis_router() -> Any:
             "streaming_supported": True,
             "analysis_endpoint": "/api/local/ai-business-analyst/agentic",
             "stream_endpoint": "/api/local/ai-business-analyst/agentic/stream",
-            "supported_file_types": ["csv", "xlsx", "xls", "pdf", "json"],
+            "supported_file_types": ["csv", "xlsx", "xls", "pdf", "json", "jsonl"],
             "cloud_configured": status.configured,
             "cloud_valid": status.valid,
             "cloud_detail": status.detail,

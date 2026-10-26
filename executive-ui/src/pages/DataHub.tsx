@@ -21,7 +21,8 @@ interface ColumnProfile {
 }
 interface Anomaly {
   id: string; kind: string; column: string; count: number; evaluated: number; percentage: number
-  severity: string; method: string; lower_fence?: number; upper_fence?: number; expired?: boolean; due_30_days?: boolean
+  severity: string; method: string; method_ar?: string; lower_fence?: number; upper_fence?: number; expired?: boolean; due_30_days?: boolean
+  periods?: string[]
 }
 interface DatasetProfile {
   id: string; filename: string; sheet: string; source_type: string; source_rows: number; analyzed_rows: number
@@ -51,7 +52,7 @@ interface ChatTurn { question: string; result?: LocalAnswer; error?: string; loa
 const MAX_FILE = 25 * 1024 * 1024
 const MAX_TOTAL = 50 * 1024 * 1024
 const MAX_FILES = 10
-const ACCEPTED = /\.(csv|xls|xlsx|json)$/i
+const ACCEPTED = /\.(csv|xls|xlsx|json|jsonl)$/i
 const CLEANING: { id: CleaningId; en: string; ar: string; noteEn: string; noteAr: string }[] = [
   { id: 'trim_text', en: 'Trim surrounding text spaces', ar: 'إزالة المسافات من أطراف النص', noteEn: 'Text values only', noteAr: 'للقيم النصية فقط' },
   { id: 'remove_blank_rows', en: 'Remove fully blank rows', ar: 'إزالة الصفوف الفارغة بالكامل', noteEn: 'No populated cells', noteAr: 'من دون خلايا معبأة' },
@@ -144,7 +145,7 @@ export function DataHub() {
     const issues: string[] = []
     const next = [...files]
     const accepted = incoming.filter((file) => ACCEPTED.test(file.name))
-    if (accepted.length !== incoming.length) issues.push(t('Some files were skipped. Choose CSV, XLS, XLSX or JSON files only.', 'تم تخطي بعض الملفات. اختر ملفات CSV أو XLS أو XLSX أو JSON فقط.'))
+    if (accepted.length !== incoming.length) issues.push(t('Some files were skipped. Choose CSV, XLS, XLSX, JSON or JSON Lines files only.', 'تم تخطي بعض الملفات. اختر ملفات CSV أو XLS أو XLSX أو JSON أو JSON Lines فقط.'))
     for (const file of accepted) {
       if (next.some((item) => item.name === file.name)) { issues.push(t(`${file.name} is already selected or has a duplicate filename.`, `الملف ${file.name} محدد مسبقاً أو يحمل اسماً مكرراً.`)); continue }
       if (file.size > MAX_FILE) { issues.push(t(`${file.name} exceeds the 25 MB per-file limit.`, `يتجاوز الملف ${file.name} الحد الأقصى البالغ 25 م.ب.`)); continue }
@@ -209,7 +210,7 @@ export function DataHub() {
     setBusy(kind === 'xlsx' ? 'export-xlsx' : 'export-pdf'); setError('')
     try {
       const form = buildInspectForm()
-      if (kind === 'pdf') form.append('language', isAr ? 'ar' : 'en')
+      form.append('language', isAr ? 'ar' : 'en')
       const response = await fetch(`/api/local/data-hub/export.${kind}`, { method: 'POST', body: form })
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}))
@@ -326,7 +327,7 @@ export function DataHub() {
             <p className="mt-1 text-xs text-slate-400">{t('CSV, XLS, XLSX or JSON · 25 MB each · 50 MB total · up to 10 files', 'CSV أو XLS أو XLSX أو JSON · 25 م.ب لكل ملف · 50 م.ب إجمالاً · حتى 10 ملفات')}</p></div>
           <button type="button" onClick={() => inputRef.current?.click()} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} className="btn-ghost min-h-9 border border-slate-700/80"><Plus size={15} />{t('Choose files', 'اختيار الملفات')}</button>
         </div>
-        <input ref={inputRef} className="sr-only" type="file" multiple accept=".csv,.xls,.xlsx,.json" aria-label={t('Choose data files', 'اختيار ملفات البيانات')} onChange={onFileChange} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} />
+        <input ref={inputRef} className="sr-only" type="file" multiple accept=".csv,.xls,.xlsx,.json,.jsonl" aria-label={t('Choose data files', 'اختيار ملفات البيانات')} onChange={onFileChange} disabled={busy !== null || forecastBusy || scenarioBusy || chatBusy} />
         <div
           role="button" tabIndex={0} aria-label={t('Drop files here or press Enter to choose files', 'أسقط الملفات هنا أو اضغط إدخال لاختيار الملفات')}
           onClick={() => inputRef.current?.click()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); inputRef.current?.click() } }}
@@ -430,8 +431,8 @@ export function DataHub() {
             <div className="mb-4 flex items-start gap-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-300/10 text-amber-200"><Fingerprint size={17} /></div><div><h2 className="text-base font-semibold">{t('Aggregate findings', 'النتائج المجمّعة')}</h2><p className="mt-1 text-xs leading-5 text-slate-400">{t('Flags are screening signals, not conclusions. No source values or individual records are displayed.', 'المؤشرات إشارات للفحص وليست استنتاجات. لا تُعرض قيم المصدر أو السجلات الفردية.')}</p></div></div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {inspection.datasets.flatMap((dataset) => dataset.anomalies.map((anomaly) => ({ dataset, anomaly }))).map(({ dataset, anomaly }, index) => <div key={`${dataset.id}-${anomaly.id}-${index}`} className="rounded-xl border border-slate-700/70 bg-[#171a34]/65 p-4">
-                <div className="flex items-start justify-between gap-3"><div><div className="text-sm font-semibold text-slate-100">{anomaly.kind.replace(/_/g, ' ')}</div><div className="mt-1 text-[11px] text-slate-500">{dataset.filename} · {anomaly.column}</div></div><span className={`rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-wide ${anomaly.severity.toLowerCase() === 'high' || anomaly.severity.toLowerCase() === 'critical' ? 'bg-rose-400/10 text-rose-200' : anomaly.severity.toLowerCase() === 'medium' ? 'bg-amber-300/10 text-amber-100' : 'bg-slate-700 text-slate-300'}`}>{anomaly.severity}</span></div>
-                <div className="mt-4 flex items-end justify-between"><div><div className="text-2xl font-semibold tabular-nums text-white">{number(anomaly.count)}</div><div className="text-[10px] text-slate-500">{t('flagged', 'موسوم')}</div></div><div className="text-right text-xs text-slate-400 rtl:text-left"><div>{number(anomaly.percentage)}% · {t('of', 'من')} {number(anomaly.evaluated)}</div><div className="mt-1 max-w-[200px] text-[10px] text-slate-500">{anomaly.method}</div></div></div>
+                <div className="flex items-start justify-between gap-3"><div><div className="text-sm font-semibold text-slate-100">{anomaly.kind === 'temporal_cost_spike' ? t('Monthly cost spikes', 'ارتفاعات التكلفة الشهرية') : anomaly.kind.replace(/_/g, ' ')}</div><div className="mt-1 text-[11px] text-slate-500">{dataset.filename} · {anomaly.column}</div></div><span className={`rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-wide ${anomaly.severity.toLowerCase() === 'high' || anomaly.severity.toLowerCase() === 'critical' ? 'bg-rose-400/10 text-rose-200' : anomaly.severity.toLowerCase() === 'medium' ? 'bg-amber-300/10 text-amber-100' : 'bg-slate-700 text-slate-300'}`}>{anomaly.severity}</span></div>
+                <div className="mt-4 flex items-end justify-between"><div><div className="text-2xl font-semibold tabular-nums text-white">{number(anomaly.count)}</div><div className="text-[10px] text-slate-500">{t('flagged', 'موسوم')}</div></div><div className="text-right text-xs text-slate-400 rtl:text-left"><div>{number(anomaly.percentage)}% · {t('of', 'من')} {number(anomaly.evaluated)}</div><div className="mt-1 max-w-[200px] text-[10px] text-slate-500">{isAr ? anomaly.method_ar ?? anomaly.method : anomaly.method}</div>{anomaly.periods?.length ? <div className="mt-1 text-[10px] text-slate-400">{t('Periods', 'الفترات')}: {anomaly.periods.join(', ')}</div> : null}</div></div>
                 {(anomaly.expired || anomaly.due_30_days) && <div className="mt-3 flex flex-wrap gap-2">{anomaly.expired && <span className="rounded-md bg-rose-300/10 px-2 py-1 text-[10px] text-rose-200">{t('Expired', 'منتهي')}</span>}{anomaly.due_30_days && <span className="rounded-md bg-amber-300/10 px-2 py-1 text-[10px] text-amber-100">{t('Due within 30 days', 'يستحق خلال 30 يوماً')}</span>}</div>}
               </div>)}
               {inspection.datasets.every((dataset) => !dataset.anomalies?.length) && <div className="col-span-full rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">{t('No aggregate flags were returned for these files.', 'لم تُرجع هذه الملفات مؤشرات مجمّعة.')}</div>}

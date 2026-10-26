@@ -65,7 +65,7 @@ def create_data_hub_router() -> APIRouter:
 
     async def read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
         if not files:
-            raise HTTPException(status_code=422, detail="Upload at least one CSV, Excel, or JSON file.")
+            raise HTTPException(status_code=422, detail="Upload at least one CSV, Excel, JSON, or JSON Lines file.")
         if len(files) > MAX_FILES_PER_REQUEST:
             raise HTTPException(status_code=413, detail=f"Upload no more than {MAX_FILES_PER_REQUEST} files at a time.")
         total = 0
@@ -79,7 +79,7 @@ def create_data_hub_router() -> APIRouter:
             seen_names.add(normalized_name)
             suffix = Path(filename).suffix.lower()
             if suffix not in SUPPORTED_DATA_HUB_EXTENSIONS:
-                raise HTTPException(status_code=415, detail=f"{filename}: use CSV, XLS, XLSX, or JSON.")
+                raise HTTPException(status_code=415, detail=f"{filename}: use CSV, XLS, XLSX, JSON, or JSON Lines.")
             content = await file.read(MAX_FILE_BYTES + 1)
             if len(content) > MAX_FILE_BYTES:
                 raise HTTPException(status_code=413, detail=f"{filename}: each file must be 25 MB or smaller.")
@@ -144,7 +144,7 @@ def create_data_hub_router() -> APIRouter:
         """Project a monthly trend from a selected date and measure."""
         filename = Path(file.filename or "upload.dat").name
         if Path(filename).suffix.lower() not in SUPPORTED_DATA_HUB_EXTENSIONS:
-            raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, or JSON.")
+            raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, JSON, or JSON Lines.")
         raw = await file.read(MAX_FILE_BYTES + 1)
         if len(raw) > MAX_FILE_BYTES:
             raise HTTPException(status_code=413, detail="Each file must be 25 MB or smaller.")
@@ -215,7 +215,7 @@ def create_data_hub_router() -> APIRouter:
         """Compare local, assumption-driven workforce scenarios; return aggregates only."""
         filename = Path(file.filename or "upload.dat").name
         if Path(filename).suffix.lower() not in SUPPORTED_DATA_HUB_EXTENSIONS:
-            raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, or JSON.")
+            raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, JSON, or JSON Lines.")
         raw = await file.read(MAX_FILE_BYTES + 1)
         if len(raw) > MAX_FILE_BYTES:
             raise HTTPException(status_code=413, detail="Each file must be 25 MB or smaller.")
@@ -288,11 +288,14 @@ def create_data_hub_router() -> APIRouter:
     async def export_summary_xlsx(
         files: list[UploadFile] = File(...),
         cleaning_options: str = Form("[]"),
+        language: str = Form("en"),
     ) -> Response:
         """Download a workbook of schema and aggregate findings—never raw rows."""
+        if language not in {"en", "ar"}:
+            raise HTTPException(status_code=422, detail="language must be 'en' or 'ar'.")
         profiles = await export_profiles(files, cleaning_options)
         try:
-            content = await asyncio.to_thread(build_summary_xlsx, profiles)
+            content = await asyncio.to_thread(build_summary_xlsx, profiles, language)
         except Exception:
             logger.exception("Data Hub workbook export failed")
             raise HTTPException(status_code=500, detail="The summary workbook could not be generated.")

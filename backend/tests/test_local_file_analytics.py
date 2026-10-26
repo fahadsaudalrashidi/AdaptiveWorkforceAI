@@ -229,11 +229,57 @@ class LocalFileAnalyticsTests(unittest.TestCase):
         answer = analyze_local_question("Total Sales", {"sales.csv": result.df})
         self.assertIn("42.50", answer.detail)
 
+    def test_json_lines_records_are_flattened_and_analyzable(self) -> None:
+        result = self.engine.ingest(
+            b'{"department":"Retail","metrics":{"sales":12.5}}\n'
+            b'{"department":"Online","metrics":{"sales":30.0}}\n',
+            "sales.jsonl",
+        )
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.row_count, 2)
+        self.assertIn("metrics.sales", result.df.columns)
+        answer = analyze_local_question("Total sales", {"sales.jsonl": result.df})
+        self.assertIn("42.50", answer.detail)
+
     def test_category_filter_without_only_is_applied(self) -> None:
         frame = pd.DataFrame({"Department": ["Retail", "Online"], "Sales": [10, 20]})
         answer = analyze_local_question("Total Sales for Retail", {"sales.csv": frame})
         self.assertEqual(answer.operation, "total")
         self.assertIn("10.00", answer.detail)
+
+    def test_arabic_and_english_financial_aliases_match_the_same_column(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Operations", "Finance", "Operations"],
+            "Annual Payroll": [100.0, 200.0, 50.0],
+            "Net Income": [60.0, 40.0, 20.0],
+            "Expenses": [10.0, 30.0, 15.0],
+        })
+        arabic = analyze_local_question("إجمالي الرواتب", {"workforce.csv": frame})
+        english = analyze_local_question("Total salary", {"workforce.csv": frame})
+        self.assertEqual(arabic.operation, "total")
+        self.assertEqual(english.operation, "total")
+        self.assertIn("350.00", arabic.detail)
+        self.assertIn("350.00", english.detail)
+
+    def test_arabic_top_costs_groups_by_department(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Operations", "Finance", "Operations", "Finance"],
+            "Expenses": [20, 30, 80, 10],
+        })
+        answer = analyze_local_question("أعلى المصاريف حسب الأقسام", {"costs.csv": frame})
+        self.assertEqual(answer.operation, "grouped_total")
+        self.assertTrue(answer.detail.startswith("Operations: 100.00"))
+
+    def test_generic_amount_fallback_is_explicit_and_unmatched_filter_fails_closed(self) -> None:
+        frame = pd.DataFrame({"Department": ["Operations", "Finance"], "Amount": [20, 30]})
+        answer = analyze_local_question("أعلى المصاريف", {"costs.csv": frame})
+        self.assertEqual(answer.operation, "maximum")
+        self.assertIn("30.00", answer.detail)
+        self.assertTrue(answer.warnings)
+
+        unmatched = analyze_local_question("Total expenses for Retail", {"costs.csv": frame})
+        self.assertEqual(unmatched.operation, "clarify")
+        self.assertTrue(unmatched.priority)
 
     def test_arabic_expired_contract_count_uses_observed_status_value(self) -> None:
         frame = pd.DataFrame({

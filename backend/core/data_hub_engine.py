@@ -19,7 +19,7 @@ import pandas as pd
 from backend.core.excel_ingestion_engine import ExcelIngestionEngine, IngestionResult
 from backend.core.secure_file_ingestion import SecureFileIngestion
 
-SUPPORTED_DATA_HUB_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json"}
+SUPPORTED_DATA_HUB_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".jsonl"}
 CLEANING_OPTIONS = {
     "trim_text",
     "remove_blank_rows",
@@ -39,6 +39,12 @@ _EXPIRY_NAME = re.compile(
 )
 _PAYROLL_NAME = re.compile(r"(payroll|salary|salar|gross|net.?pay|wage|overtime|بدل|راتب|أجر)", re.I)
 _BUDGET_NAME = re.compile(r"(budget|actual|planned|forecast|ميزانية|فعلي|مخطط)", re.I)
+_COST_NAME = re.compile(
+    r"(payroll|salary|salar|gross.?pay|net.?pay|wage|overtime|labor|labour|"
+    r"cost|expense|spend|expenditure|budget|amount|مصاريف|مصروفات|تكلفة|"
+    r"تكاليف|راتب|أجور|أجر|ميزانية)",
+    re.I,
+)
 _SAFE_LABEL_LIMIT = 160
 
 
@@ -255,6 +261,65 @@ def _compliance_checks(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return checks
 
 
+def _temporal_cost_checks(frame: pd.DataFrame, sensitive: set[str]) -> list[dict[str, Any]]:
+    """Flag sharp rises in monthly aggregate costs using a rolling robust baseline."""
+    date_columns = [
+        column for column in frame.columns
+        if _DATE_NAME.search(str(column))
+        or pd.api.types.is_datetime64_any_dtype(frame[column])
+    ]
+    if not date_columns:
+        return []
+    date_column = date_columns[0]
+    dates = _parse_dates(frame[date_column])
+    if isinstance(dates.dtype, pd.DatetimeTZDtype):
+        dates = dates.dt.tz_localize(None)
+
+    checks: list[dict[str, Any]] = []
+    for column in frame.columns:
+        name = str(column)
+        if name in sensitive or not _COST_NAME.search(name):
+            continue
+        values = _clean_numeric(frame[column])
+        valid = dates.notna() & values.notna()
+        if int(valid.sum()) < 8:
+            continue
+        data = pd.DataFrame({"period": dates[valid].dt.to_period("M"), "value": values[valid]})
+        monthly = data.groupby("period", sort=True)["value"].sum(min_count=1).dropna()
+        if len(monthly) < 8:
+            continue
+
+        flagged_periods: list[str] = []
+        window = 6
+        for index in range(window, len(monthly)):
+            history = monthly.iloc[index - window:index]
+            baseline = float(history.median())
+            mad = float((history - baseline).abs().median())
+            robust_scale = 1.4826 * mad
+            # A 50% floor avoids treating minor jitter as an incident when
+            # historical values are flat and MAD is zero.
+            threshold = baseline + max(3 * robust_scale, abs(baseline) * 0.5, 1e-9)
+            if float(monthly.iloc[index]) > threshold:
+                flagged_periods.append(str(monthly.index[index]))
+        evaluated = len(monthly) - window
+        if not flagged_periods:
+            continue
+        rate = len(flagged_periods) * 100 / max(evaluated, 1)
+        checks.append({
+            "id": "temporal_cost_spike",
+            "kind": "temporal_cost_spike",
+            "column": name[:_SAFE_LABEL_LIMIT],
+            "count": len(flagged_periods),
+            "evaluated": evaluated,
+            "percentage": _finite(rate),
+            "severity": "high" if rate >= 20 else "moderate",
+            "method": "Monthly aggregate compared with the prior six-month median + robust MAD threshold (50% minimum rise)",
+            "method_ar": "مقارنة الإجمالي الشهري بوسيط الأشهر الستة السابقة وحدّ MAD متين (ارتفاع أدنى 50%)",
+            "periods": flagged_periods[:12],
+        })
+    return checks
+
+
 def profile_frame(
     frame: pd.DataFrame,
     *,
@@ -328,6 +393,7 @@ def profile_frame(
 
     anomalies.extend(_payroll_checks(cleaned, sensitive_columns))
     anomalies.extend(_compliance_checks(cleaned))
+    anomalies.extend(_temporal_cost_checks(cleaned, sensitive_columns))
 
     duplicate_rows = int(cleaned.duplicated().sum())
     suggestions = [
@@ -729,10 +795,14 @@ def workforce_scenario_frame(
     }
 
 
-def build_summary_xlsx(profiles: list[dict[str, Any]]) -> bytes:
+def build_summary_xlsx(profiles: list[dict[str, Any]], language: str = "en") -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
+
+    if language not in {"en", "ar"}:
+        raise ValueError("language must be 'en' or 'ar'.")
+    is_ar = language == "ar"
 
     def safe_text(value: Any) -> str:
         text = str(value if value is not None else "")[:32000]
@@ -740,35 +810,57 @@ def build_summary_xlsx(profiles: list[dict[str, Any]]) -> bytes:
 
     workbook = Workbook()
     overview = workbook.active
-    overview.title = "Overview"
-    overview.append(["THRIVE Data Hub — Aggregate Summary"])
-    overview.append(["Generated (UTC)", pd.Timestamp.now(tz="UTC").isoformat()])
-    overview.append(["Privacy", "Schema and aggregate metrics only; no source records included."])
-    overview.append(["Files / sheets", len(profiles)])
-    overview.append(["Source rows", sum(int(item["source_rows"]) for item in profiles)])
-    overview.append(["Analyzed rows", sum(int(item["analyzed_rows"]) for item in profiles)])
+    overview.title = "نظرة عامة" if is_ar else "Overview"
+    overview.append(["THRIVE — ملخص مركز البيانات" if is_ar else "THRIVE Data Hub — Aggregate Summary"])
+    overview.append(["تاريخ الإنشاء (UTC)" if is_ar else "Generated (UTC)", pd.Timestamp.now(tz="UTC").isoformat()])
+    overview.append([
+        "الخصوصية",
+        "مخطط البيانات والمؤشرات المجمعة فقط؛ لا يتضمن سجلات المصدر."
+        if is_ar else "Schema and aggregate metrics only; no source records included.",
+    ])
+    overview.append(["الملفات / الأوراق" if is_ar else "Files / sheets", len(profiles)])
+    overview.append(["صفوف المصدر" if is_ar else "Source rows", sum(int(item["source_rows"]) for item in profiles)])
+    overview.append(["الصفوف المحللة" if is_ar else "Analyzed rows", sum(int(item["analyzed_rows"]) for item in profiles)])
 
-    schema = workbook.create_sheet("Data Profile")
-    schema.append(["File", "Sheet", "Column", "Type", "Missing", "Missing %", "Unique", "Sensitive", "Mean", "Median", "Min", "Max", "Outlier count"])
-    anomaly_sheet = workbook.create_sheet("Anomalies")
-    anomaly_sheet.append(["File", "Sheet", "Signal", "Column", "Flagged", "Evaluated", "Rate %", "Severity", "Method"])
-    cleaning_sheet = workbook.create_sheet("Cleaning Log")
-    cleaning_sheet.append(["File", "Sheet", "Operation", "Cells / rows / columns changed"])
+    schema = workbook.create_sheet("ملف البيانات" if is_ar else "Data Profile")
+    schema.append(
+        ["الملف", "الورقة", "العمود", "النوع", "المفقود", "نسبة المفقود %", "الفريد", "حساس", "المتوسط", "الوسيط", "الحد الأدنى", "الحد الأعلى", "عدد القيم الشاذة"]
+        if is_ar else
+        ["File", "Sheet", "Column", "Type", "Missing", "Missing %", "Unique", "Sensitive", "Mean", "Median", "Min", "Max", "Outlier count"]
+    )
+    anomaly_sheet = workbook.create_sheet("إشارات المراجعة" if is_ar else "Anomalies")
+    anomaly_sheet.append(
+        ["الملف", "الورقة", "الإشارة", "العمود", "المُعلّم", "المقيّم", "النسبة %", "الخطورة", "المنهجية", "الفترات"]
+        if is_ar else
+        ["File", "Sheet", "Signal", "Column", "Flagged", "Evaluated", "Rate %", "Severity", "Method", "Periods"]
+    )
+    cleaning_sheet = workbook.create_sheet("سجل التنظيف" if is_ar else "Cleaning Log")
+    cleaning_sheet.append(
+        ["الملف", "الورقة", "العملية", "الخلايا / الصفوف / الأعمدة المتغيرة"]
+        if is_ar else
+        ["File", "Sheet", "Operation", "Cells / rows / columns changed"]
+    )
     for profile in profiles:
         for column in profile["columns"]:
             stats = column.get("numeric_summary") or {}
             schema.append([
                 safe_text(profile["filename"]), safe_text(profile["sheet"]), safe_text(column["name"]),
                 safe_text(column["type"]), int(column["missing_count"]), column["missing_percent"],
-                int(column["unique_count"]), "Yes" if column["sensitive"] else "No",
+                int(column["unique_count"]), ("نعم" if column["sensitive"] else "لا") if is_ar else ("Yes" if column["sensitive"] else "No"),
                 stats.get("mean"), stats.get("median"), stats.get("min"), stats.get("max"),
                 column.get("outlier_count"),
             ])
         for anomaly in profile["anomalies"]:
             anomaly_sheet.append([
-                safe_text(profile["filename"]), safe_text(profile["sheet"]), safe_text(anomaly["kind"]),
+                safe_text(profile["filename"]), safe_text(profile["sheet"]),
+                safe_text(
+                    "ارتفاعات التكلفة الشهرية" if is_ar and anomaly["kind"] == "temporal_cost_spike"
+                    else anomaly["kind"]
+                ),
                 safe_text(anomaly["column"]), int(anomaly["count"]), int(anomaly["evaluated"]),
-                anomaly.get("percentage"), safe_text(anomaly["severity"]), safe_text(anomaly["method"]),
+                anomaly.get("percentage"), safe_text(anomaly["severity"]),
+                safe_text(anomaly.get("method_ar") if is_ar else anomaly["method"]),
+                safe_text(", ".join(anomaly.get("periods", []))),
             ])
         for item in profile["applied_cleaning"]:
             cleaning_sheet.append([
@@ -776,6 +868,7 @@ def build_summary_xlsx(profiles: list[dict[str, Any]]) -> bytes:
             ])
 
     for sheet in workbook.worksheets:
+        sheet.sheet_view.rightToLeft = is_ar
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for cell in sheet[1]:
@@ -857,11 +950,23 @@ def build_summary_pdf(profiles: list[dict[str, Any]], language: str = "en") -> b
                 f"Heuristic quality: {profile['quality_score']}/100 | Review signals: {len(profile['anomalies'])}"
             )
         for anomaly in profile["anomalies"][:20]:
+            anomaly_label = (
+                "ارتفاعات التكلفة الشهرية"
+                if is_ar and anomaly["kind"] == "temporal_cost_spike"
+                else anomaly["kind"]
+            )
             write(
-                f"• {anomaly['kind']} — {anomaly['column']}: {anomaly['count']} / "
-                f"{anomaly['evaluated']} ({anomaly.get('percentage') or 0}%) — {anomaly['method']}",
+                f"• {anomaly_label} — {anomaly['column']}: {anomaly['count']} / "
+                f"{anomaly['evaluated']} ({anomaly.get('percentage') or 0}%) — "
+                f"{anomaly.get('method_ar') if is_ar else anomaly['method']}",
                 size=9,
             )
+            periods = ", ".join(anomaly.get("periods", []))
+            if periods:
+                write(
+                    f"الفترات: {periods}" if is_ar else f"Periods: {periods}",
+                    size=8,
+                )
         if profile["anomalies"]:
             write("Column-level anomaly counts are review signals, not source records.", size=8)
         for column in profile["columns"][:100]:
