@@ -113,10 +113,13 @@ class LocalFileAnalyticsTests(unittest.TestCase):
         answer = analyze_local_question("What is total profit?", {"sales.csv": frame})
         self.assertEqual(answer.operation, "clarify")
 
-    def test_unsupported_filter_never_returns_an_unfiltered_sum(self) -> None:
+    def test_natural_category_filter_is_applied_to_sum(self) -> None:
         frame = pd.DataFrame({"Sales": [10, 20], "Department": ["Retail", "Online"]})
         answer = analyze_local_question("Total sales only for Retail", {"sales.csv": frame})
-        self.assertEqual(answer.operation, "clarify")
+        self.assertEqual(answer.operation, "total")
+        self.assertIn("10.00", answer.detail)
+        self.assertEqual(answer.query_audit["cohorts"][0]["value"], 10)
+        self.assertEqual(answer.query_audit["cohorts"][0]["matched_rows"], 1)
 
     def test_governed_upload_preserves_json_and_pdf_formats(self) -> None:
         from backend.api.local_analysis_routes import _ingest_analyst_upload
@@ -226,11 +229,63 @@ class LocalFileAnalyticsTests(unittest.TestCase):
         answer = analyze_local_question("Total Sales", {"sales.csv": result.df})
         self.assertIn("42.50", answer.detail)
 
-    def test_category_filter_is_not_ignored(self) -> None:
+    def test_category_filter_without_only_is_applied(self) -> None:
         frame = pd.DataFrame({"Department": ["Retail", "Online"], "Sales": [10, 20]})
         answer = analyze_local_question("Total Sales for Retail", {"sales.csv": frame})
-        self.assertEqual(answer.operation, "clarify")
-        self.assertTrue(answer.priority)
+        self.assertEqual(answer.operation, "total")
+        self.assertIn("10.00", answer.detail)
+
+    def test_arabic_expired_contract_count_uses_observed_status_value(self) -> None:
+        frame = pd.DataFrame({
+            "حالة العقد": ["منتهي", "نشط", "منتهي", None],
+            "القسم": ["المبيعات", "المبيعات", "العمليات", "العمليات"],
+        })
+        answer = answer_question(
+            "كم عقد منتهي؟", {}, use_llm=False,
+            uploaded_frames={"contracts.csv": frame},
+        )
+        self.assertEqual(answer.matched_query_id, "local.count")
+        self.assertIn("عدد السجلات", answer.answer_text)
+        self.assertEqual(answer.query_audit["cohorts"][0]["value"], 2)
+        self.assertEqual(answer.query_audit["cohorts"][0]["filters"][0]["value"], "منتهي")
+
+    def test_natural_english_count_filter_is_applied_and_audited(self) -> None:
+        frame = pd.DataFrame({
+            "Contract Status": ["Expired", "Active", "Expired", None],
+            "Department": ["Sales", "Sales", "Operations", "Operations"],
+        })
+        answer = answer_question(
+            "How many contracts are Expired?", {}, use_llm=False,
+            uploaded_frames={"contracts.csv": frame},
+        )
+        self.assertEqual(answer.matched_query_id, "local.count")
+        self.assertEqual(answer.query_audit["cohorts"][0]["value"], 2)
+        self.assertEqual(answer.query_audit["cohorts"][0]["filters"][0]["value"], "Expired")
+
+    def test_grouping_does_not_treat_measure_name_as_category_filter(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Sales", "Retail", "Sales"],
+            "Sales": [10, 20, 30],
+        })
+        answer = analyze_local_question("Total Sales by Department", {"sales.csv": frame})
+        self.assertEqual(answer.operation, "grouped_total")
+        self.assertIn("Sales: 40.00", answer.detail)
+        self.assertIn("Retail: 20.00", answer.detail)
+
+    def test_unmatched_uploaded_data_question_returns_schema_guidance(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Sales", "Operations"],
+            "Net Revenue": [100.0, 80.0],
+            "Period": ["2026-01", "2026-02"],
+        })
+        answer = answer_question(
+            "Which teams improved the most?", {}, use_llm=False,
+            uploaded_frames={"monthly.csv": frame},
+        )
+        self.assertEqual(answer.mode, "guidance")
+        self.assertEqual(answer.matched_query_id, "local.schema_guide")
+        self.assertIn("Net Revenue", answer.key_evidence[0].excerpt)
+        self.assertIn("no metric was calculated", " ".join(answer.limitations).lower())
 
     def test_ambiguous_day_month_dates_require_iso_format(self) -> None:
         frame = pd.DataFrame({"Date": ["01/02/2026", "02/03/2026"], "Sales": [10, 20]})

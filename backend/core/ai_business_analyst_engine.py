@@ -12,22 +12,21 @@ ARCHITECTURE
     User question
         │
         ▼
-    Deterministic intent classifier (regex/keyword, ALWAYS runs — see
-    "Why dispatch is never LLM-driven" below)
-        │
-        ▼
-    Allowlisted Query Registry (QUERY_REGISTRY, a fixed dict literal below)
-        │                                          │
-        ▼                                          ▼
-    Engines (computed_metric evidence)      RAG over project docs
-    — calls ONE real, already-existing      (knowledge_context evidence)
-      engine function per registry entry.   — TF-IDF retrieval over this
-      Never eval, never dynamic dispatch,     session's own PHASE_*.md /
-      never free-form code generation.        BUSINESS_INTELLIGENCE_SUITE_
-                                               OVERVIEW.md corpus. NEVER
-                                               reads live business data.
-        │                                          │
-        └──────────────► Unified Evidence Pack ◄───┘
+    Injection and ambiguity guards
+        ├───────────────────────────────────────────────┐
+        ▼                                               ▼
+    Uploaded-table interpreter                 Specialized domain registry
+    — grounds question to safe schema           — calls existing verified
+      and exact observed categories, then           engines for domain metrics.
+      runs bounded pandas operations.              An optional source, not a
+      Never generated SQL/Python.                   question allowlist.
+        └───────────────────┬───────────────────────────┘
+                            ▼
+                 RAG over project docs (knowledge
+                 questions only; never live data)
+                            │
+                            ▼
+                 Unified Evidence Pack
                                 │
                                 ▼
                     Local LLM (Ollama, optional) — PHRASING ONLY,
@@ -45,9 +44,8 @@ ARCHITECTURE
 the LLM to classify intent and pick a registry key. Rejected: that would
 make the LLM's raw output control which code path executes — precisely
 the "LLM decides what to compute" failure mode Section 6 of this phase's
-brief prohibits. Instead, intent classification and registry lookup are
-100% deterministic regex/keyword matching, identical whether or not Ollama
-is available. The LLM (when present) touches ONLY the already-verified
+brief prohibits. Local table parsing and registry lookup are deterministic
+and identical whether or not Ollama is available. The LLM (when present) touches ONLY the already-verified
 Evidence Pack's numbers to produce prose — it is structurally incapable of
 choosing what gets computed, because that decision is made and finalized
 before the LLM is ever invoked.
@@ -161,7 +159,9 @@ from backend.core.procurement_intelligence_engine import analyze_procurement_int
 from backend.core.logistics_intelligence_engine import analyze_logistics_intelligence
 from backend.core.operations_intelligence_engine import analyze_operations_intelligence
 from backend.core.overtime_cost_intelligence_engine import analyze_overtime_cost_intelligence
-from backend.core.local_question_engine import LocalTableAnswer, analyze_local_question
+from backend.core.local_question_engine import (
+    LocalTableAnswer, analyze_local_question, guide_from_schema,
+)
 from backend.core.local_contract_questions import answer_contract_count
 
 try:
@@ -1101,9 +1101,9 @@ def _local_file_answer(result: LocalTableAnswer) -> AnalystAnswer:
     )
     evidence: list[EvidenceEntry] = []
     if result.detail:
-        if result.operation == "document_search":
+        if result.operation in {"document_search", "schema_guide"}:
             evidence.append(KnowledgeContextEvidence(
-                label="Uploaded document excerpt",
+                label="Uploaded dataset schema" if result.operation == "schema_guide" else "Uploaded document excerpt",
                 excerpt=result.detail,
                 source_file=result.source_file,
             ))
@@ -1137,9 +1137,13 @@ def _local_file_answer(result: LocalTableAnswer) -> AnalystAnswer:
         answer_text=result.text, key_evidence=evidence,
         source_engine=source_engine,
         data_period=None,
-        evidence_level=EVIDENCE_INSUFFICIENT if result.operation == "clarify" else EVIDENCE_LIMITED,
+        evidence_level=EVIDENCE_INSUFFICIENT if result.operation in {"clarify", "schema_guide"} else EVIDENCE_LIMITED,
         limitations=limitations,
-        mode="document" if result.operation == "document_search" else "tabular",
+        mode=(
+            "document" if result.operation == "document_search"
+            else "guidance" if result.operation == "schema_guide"
+            else "tabular"
+        ),
         matched_query_id=f"local.{result.operation}",
         query_audit=result.query_audit,
     )
@@ -1162,8 +1166,8 @@ def answer_question(
     if is_injection_attempt(question):
         return AnalystAnswer(
             "This request looks like an attempt to make the system execute a command or ignore its "
-            "own rules. The AI Business Analyst only ever runs a fixed, pre-registered list of "
-            "verified business queries — it cannot execute code, run commands, access arbitrary "
+            "own rules. The AI Business Analyst only runs bounded local table operations or "
+            "pre-registered domain engines — it cannot execute user code, run commands, access arbitrary "
             "files, or follow instructions embedded in a question. Request refused.",
             [], None, None, EVIDENCE_INSUFFICIENT, ["Trust-boundary refusal — no engine or file was accessed."], "refused",
         )
@@ -1179,11 +1183,11 @@ def answer_question(
         analyze_local_question(question, uploaded_frames, pii_columns_by_file)
         if uploaded_frames else None
     )
-    # Explicit file-column operations take precedence over broad business
-    # keyword matches, which could otherwise ignore a requested grouping.
+    # Uploaded-file operations take precedence over broad business-keyword
+    # matches, which could otherwise ignore a requested grouping or filter.
     # Safety/ambiguity clarifications must never be overridden by a registry
-    # metric. Specialized metrics still use the registry when no direct
-    # table operation is available.
+    # metric. Specialized metrics remain available when no direct table
+    # operation can answer the request.
     if local_result is not None and (local_result.operation != "clarify" or local_result.priority):
         return _local_file_answer(local_result)
 
@@ -1198,36 +1202,34 @@ def answer_question(
                 return registered_answer
             unavailable_registered_answer = registered_answer
 
-    # RAG is attempted ONLY when the question itself signals a knowledge/
-    # methodology question (explicit trigger words) — NEVER as a blanket
-    # fallback for "didn't match a registered metric." Without this
-    # restriction, an unregistered business-data question (e.g. one asking
-    # for a metric this phase didn't register) could spuriously match some
-    # documentation paragraph on shared vocabulary and be answered from
-    # project docs instead of honestly reporting "not in the registry" —
-    # exactly the kind of RAG-answers-a-numeric-question conflation
-    # Section 1b prohibits.
-    # If a fixed business query did not match, run only a small, deterministic
-    # aggregation/document-retrieval vocabulary over tables already parsed and
-    # governance-scanned by the API. No code, SQL, or model-generated formula
-    # is executed. Raw record-level PII columns are excluded from this path.
+    # RAG answers knowledge/methodology questions only; uploaded business
+    # metrics are never inferred from documentation. When no table operation
+    # or registered metric answers an uploaded-data question, return schema-
+    # grounded guidance rather than a registry rejection.
     if local_result is not None:
+        if local_result.operation == "clarify" and not local_result.priority and uploaded_frames:
+            schema_guide = guide_from_schema(question, uploaded_frames, pii_columns_by_file)
+            if schema_guide is not None:
+                return _local_file_answer(schema_guide)
         return _local_file_answer(local_result)
-
-    if unavailable_registered_answer is not None:
-        return unavailable_registered_answer
 
     if is_knowledge_question(question):
         knowledge = retrieve_knowledge(question)
         if knowledge:
             return _finalize_knowledge_answer(question, knowledge, use_llm)
 
+    if uploaded_frames:
+        schema_guide = guide_from_schema(question, uploaded_frames, pii_columns_by_file)
+        if schema_guide is not None:
+            return _local_file_answer(schema_guide)
+
+    if unavailable_registered_answer is not None:
+        return unavailable_registered_answer
+
     return AnalystAnswer(
-        "I don't have a registered way to answer this question — it doesn't match any of this "
-        "platform's verified business queries, and no relevant project documentation was found "
-        "either. I won't guess or answer from general knowledge.",
+        "No uploaded dataset or matching specialized metric is available for this question. Upload a supported file, or ask about one of the platform's verified domain metrics.",
         [], None, None, EVIDENCE_INSUFFICIENT,
-        ["Unsupported question — not in the allowlisted registry, no RAG match above the relevance floor."],
+        ["No data-backed result was computed. No arbitrary code or external model was executed."],
         "unsupported",
     )
 

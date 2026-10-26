@@ -74,7 +74,7 @@ interface AnalystAnswerJSON {
   data_period: string | null
   evidence_level: 'high' | 'limited' | 'insufficient'
   limitations: string[]
-  mode: 'llm' | 'deterministic' | 'rag' | 'rag+llm' | 'refused' | 'unsupported'
+  mode: 'llm' | 'deterministic' | 'rag' | 'rag+llm' | 'refused' | 'unsupported' | 'tabular' | 'document' | 'guidance'
   matched_query_id: string | null
   computed_at: string
   query_audit?: QueryAuditJSON | null
@@ -208,12 +208,14 @@ const EVIDENCE_BADGE: Record<string, { tone: 'positive' | 'caution' | 'critical'
 const MODE_LABEL_EN: Record<string, string> = {
   llm: 'Local LLM', deterministic: 'Deterministic fallback', rag: 'Project documentation',
   'rag+llm': 'Local LLM (from documentation)', tabular: 'Local data analysis',
-  document: 'Local PDF text search', refused: 'Trust-boundary refusal', unsupported: 'Not supported',
+  document: 'Local PDF text search', guidance: 'Dataset schema guidance',
+  refused: 'Trust-boundary refusal', unsupported: 'No data-backed result',
 }
 const MODE_LABEL_AR: Record<string, string> = {
   llm: 'نموذج محلي', deterministic: 'احتياطي حتمي', rag: 'وثائق المشروع',
   'rag+llm': 'نموذج محلي (من الوثائق)', tabular: 'تحليل البيانات محلياً',
-  document: 'بحث نصي محلي في PDF', refused: 'رفض حدود الثقة', unsupported: 'غير مدعوم',
+  document: 'بحث نصي محلي في PDF', guidance: 'إرشادات مخطط البيانات',
+  refused: 'رفض حدود الثقة', unsupported: 'لا توجد نتيجة مستندة إلى البيانات',
 }
 
 function fmtValue(value: unknown, unit: string | null): string {
@@ -434,14 +436,14 @@ export function AIBusinessAnalyst() {
       <div className="card p-4 space-y-3">
         <button onClick={() => setShowRegistry((s) => !s)} className="flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300">
           <BookOpen size={16} />
-          {t('What can I ask?', 'ماذا يمكنني أن أسأل؟')}
+          {t('Prebuilt metrics & examples', 'مقاييس وأمثلة جاهزة')}
           {showRegistry ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
         <AnimatePresence>
           {showRegistry && registry && (
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
               <p className="text-xs text-slate-400 mb-2">
-                {t('Only these registered queries are answered from real data — every question is matched against this fixed list, never freely computed.', 'يُجاب فقط على هذه الاستعلامات المُسجّلة من بيانات حقيقية.')}
+                {t('These are examples for specialized domain metrics. Uploaded files can also be queried naturally in Arabic or English using their safe columns; calculations stay local and auditable.', 'هذه أمثلة لمقاييس متخصصة. يمكنك أيضاً طرح أسئلة طبيعية بالعربية أو الإنجليزية عن الملفات المرفوعة باستخدام أعمدتها الآمنة؛ وتبقى الحسابات محلية وقابلة للمراجعة.')}
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-64 overflow-y-auto">
                 {registry.registry.map((entry) => (
@@ -465,8 +467,8 @@ export function AIBusinessAnalyst() {
           {t('Excel includes all non-empty sheets. Scanned PDFs use offline Arabic + English OCR on this server—no paid API. Uncertain figures must be verified against a corrected source before calculations.', 'يشمل Excel كل الأوراق غير الفارغة. تُحلَّل ملفات PDF الممسوحة ضوئياً محلياً وبلا إنترنت باستخدام OCR للعربية والإنجليزية، من دون واجهة مدفوعة. يجب التحقق من الأرقام غير المؤكدة بمصدر مُصحح قبل إجراء الحسابات.')}
         </p>
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          {t('Use exact column names. For filters, use the explicit English syntax below with your own column names and values. Dates must be YYYY-MM-DD; category values are case-sensitive. Add from "exact-file.csv" before where when multiple files or sheets are uploaded. Supported: total, average, count records; =, !=, >, >=, <, <=; join filters with and.', 'استخدم أسماء الأعمدة الفعلية. للتصفية، استخدم الصيغة الإنجليزية الصريحة أدناه مع أسماء أعمدتك وقيمك. يجب أن تكون التواريخ بصيغة YYYY-MM-DD؛ قيم الفئات حساسة لحالة الأحرف. أضف from "exact-file.csv" قبل where عند رفع ملفات أو أوراق متعددة. العمليات المدعومة: total وaverage وcount records؛ المعاملات = و!= و> و>= و< و<=؛ اربط الشروط باستخدام and.')}
-          <code dir="ltr" className="block text-xs mt-2 whitespace-pre-wrap">{'total "Net Sales" where "Department" = "Retail" and "Date" >= "2025-01-01"\ncompare total "Net Sales" where "Department" = "Retail" versus "Department" = "Online"'}</code>
+          {t('Ask naturally in Arabic or English and use column names or exact category values from your file. Examples work without a language model. For exact numeric/date filters or two-cohort comparisons, use the explicit syntax below; dates must be YYYY-MM-DD. When multiple files or sheets are attached, identify the source by name.', 'اسأل بصياغة طبيعية بالعربية أو الإنجليزية، واستخدم أسماء الأعمدة أو قيم الفئات الموجودة في الملف. تعمل الأمثلة من دون نموذج لغوي. للتصفية الرقمية أو الزمنية الدقيقة أو مقارنة مجموعتين، استخدم الصيغة الصريحة أدناه؛ ويجب أن تكون التواريخ بصيغة YYYY-MM-DD. عند إرفاق عدة ملفات أو أوراق، حدّد المصدر باسمه.')}
+          <code dir="ltr" className="block text-xs mt-2 whitespace-pre-wrap">{'How many contracts are Expired?  ·  كم عقد منتهي؟\nTotal Net Sales by Department\nTotal "Net Sales" where "Department" = "Retail" and "Date" >= "2025-01-01"\ncompare total "Net Sales" where "Department" = "Retail" versus "Department" = "Online"'}</code>
         </p>
         <div className="flex flex-wrap gap-4 text-xs text-slate-500 dark:text-slate-400">
           <label className={`flex items-center gap-1.5 ${registry?.ollama_reachable ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'}`} title={t('Optional local Ollama rephrasing; deterministic calculations work without it.', 'إعادة صياغة اختيارية باستخدام Ollama محلياً؛ تعمل الحسابات الحتمية من دونه.')}>

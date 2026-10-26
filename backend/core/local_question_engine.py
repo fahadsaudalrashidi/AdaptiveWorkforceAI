@@ -1,8 +1,7 @@
-"""Small, deterministic analytics over already-ingested, governance-scanned tables.
+"""Local, schema-grounded analytics over governance-scanned uploaded tables.
 
-This intentionally answers a narrow set of auditable aggregation and
-document-retrieval questions. It does not execute user SQL/Python or ask a
-language model to invent a calculation.
+Natural language is translated into bounded pandas operations. This module
+never executes user SQL/Python or asks a language model to invent a calculation.
 """
 from __future__ import annotations
 
@@ -17,13 +16,34 @@ import pandas as pd
 from backend.core.local_query_plan import HELP, PlanError, execute_plan, parse_plan
 
 
-_TOKEN = re.compile(r"[a-z0-9\u0600-\u06ff]+", re.I)
+_TOKEN = re.compile(
+    r"[a-z0-9\u0621-\u063a\u0641-\u064a\u0660-\u0669\u0671-\u06d3\u06fa-\u06fc]+",
+    re.I,
+)
+_ARABIC_MARKS = re.compile(r"[\u064b-\u065f\u0670\u0640]")
+_ARABIC_TRANSLATION = str.maketrans({
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي",
+})
 _STOP = {
     "a", "an", "and", "are", "by", "for", "from", "in", "is", "of", "our",
     "the", "to", "what", "which", "with", "show", "me", "give", "please",
     "data", "file", "report", "this", "all", "on", "per", "each", "among",
+    "has", "have", "do", "does", "there", "was", "were",
     "ما", "هو", "هي", "من", "في", "على", "عن", "الى", "إلى", "هذا", "هذه",
-    "بيانات", "ملف", "الملف", "من فضلك", "مع", "كل", "حسب", "لكل",
+    "بيانات", "ملف", "الملف", "فضلك", "مع", "كل", "حسب", "لكل",
+    "هل", "ماهي", "ماهو", "ماذا", "اعطني", "اريد", "رجاء",
+}
+_COUNT_TERMS = {"count", "many", "number", "records", "rows", "عدد", "كم", "احصاء", "احصي"}
+_SUM_TERMS = {"sum", "total", "overall", "amount", "مجموع", "اجمالي", "قيمة", "قيمه"}
+_AVERAGE_TERMS = {"average", "avg", "mean", "typical", "متوسط", "معدل"}
+_TOP_TERMS = {"highest", "largest", "top", "most", "maximum", "max", "اعلي", "الاكثر", "اكثر", "اكبر"}
+_BOTTOM_TERMS = {"lowest", "smallest", "bottom", "least", "minimum", "min", "أقل", "الاقل", "ادنى", "اصغر"}
+_TREND_TERMS = {"trend", "trending", "over time", "month", "monthly", "year", "yearly", "time", "اتجاه", "شهريا", "شهري", "سنويا", "سنوي"}
+_GROUP_TERMS = {"by", "per", "each", "group", "grouped", "breakdown", "distribution", "حسب", "لكل", "بحسب", "توزيع", "تصنيف", "تقسيم"}
+_RECORD_TERMS = {
+    "contract", "contracts", "invoice", "invoices", "employee", "employees",
+    "staff", "person", "people", "records", "rows", "عقد", "عقود", "موظف",
+    "موظفين", "عامل", "عمال", "سجل", "سجلات",
 }
 _SENSITIVE = re.compile(
     r"(?:^|[^a-z0-9])(?:name|employee|person|phone|mobile|email|address|"
@@ -52,7 +72,24 @@ def _tokens(text: str) -> set[str]:
     text = unicodedata.normalize("NFKC", text).translate(
         str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
     )
-    return {token for token in _TOKEN.findall(text.lower()) if token not in _STOP}
+    text = _ARABIC_MARKS.sub("", text).translate(_ARABIC_TRANSLATION).lower()
+    result: set[str] = set()
+    for token in _TOKEN.findall(text):
+        if token in _STOP:
+            continue
+        if re.search(r"[\u0600-\u06ff]", token):
+            if token.startswith("ال") and len(token) > 4:
+                token = token[2:]
+            if token.endswith("ية") and len(token) > 4:
+                token = token[:-2] + "ي"
+            if token == "عقود":
+                token = "عقد"
+        result.add(token)
+    return result
+
+
+def _language_is_arabic(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06ff]", text))
 
 
 def _safe_column(name: Any) -> bool:
@@ -96,23 +133,183 @@ def _match_columns(question: str, frame: pd.DataFrame, columns: list[str]) -> li
     return [column for exact, overlap, column in ranked if (exact, overlap) == best]
 
 
+def _natural_category_filters(
+    question: str,
+    frame: pd.DataFrame,
+    columns: list[str],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, list[str]]]]:
+    """Find exact observed low-cardinality text values named in the question.
+
+    No fuzzy matching is used: a selected category must be present in the
+    uploaded data and its normalized tokens must appear in the question.
+    """
+    asked = _tokens(question)
+    operation_words = (
+        _COUNT_TERMS | _SUM_TERMS | _AVERAGE_TERMS | _TOP_TERMS
+        | _BOTTOM_TERMS | _TREND_TERMS | _GROUP_TERMS
+    )
+    raw_words = set(_TOKEN.findall(question.lower()))
+    grouping_intent = bool(asked & (_GROUP_TERMS - {"by", "per", "each"})) or bool(
+        raw_words & {"by", "per", "each"}
+    )
+    measure_tokens = set().union(*(
+        _tokens(str(column))
+        for column in columns
+        if _numeric_series(frame[column]) is not None
+    )) if grouping_intent and columns else set()
+    negative = bool(asked & {"not", "without", "غير", "ليس", "ليست", "بدون"})
+    candidates: dict[str, set[str]] = {}
+    for column in columns:
+        series = frame[column]
+        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_datetime64_any_dtype(series):
+            continue
+        values = series.dropna().unique()
+        if not values.size or len(values) > 100:
+            continue
+        column_tokens = _tokens(str(column))
+        for raw_value in values:
+            if not isinstance(raw_value, str):
+                continue
+            value = raw_value.strip()
+            value_tokens = _tokens(value)
+            if not value_tokens or len(value_tokens) > 6:
+                continue
+            discriminating = value_tokens - column_tokens - operation_words - measure_tokens
+            if discriminating and value_tokens <= asked:
+                candidates.setdefault(column, set()).add(value)
+
+    ambiguous = [
+        (column, sorted(values))
+        for column, values in candidates.items()
+        if len(values) > 1
+    ]
+    if ambiguous:
+        return [], ambiguous
+    filters = [
+        (column, "!=" if negative else "=", next(iter(values)))
+        for column, values in candidates.items()
+    ]
+    return filters, []
+
+
+def _build_filter_audit(
+    filename: str,
+    operation: str,
+    measure: str | None,
+    source: pd.DataFrame,
+    selected: pd.DataFrame,
+    filters: list[dict[str, Any]],
+    missing_filter_rows: int,
+    included_rows: int,
+    value: float | int | None = None,
+) -> dict[str, Any]:
+    matched_rows = len(selected)
+    return {
+        "source_file": filename,
+        "operation": operation,
+        "measure": measure,
+        "currency": None,
+        "cohorts": [{
+            "filters": filters,
+            "source_rows": len(source),
+            "matched_rows": matched_rows,
+            "included_rows": included_rows,
+            "excluded_rows": len(source) - included_rows,
+            "missing_filter_rows": missing_filter_rows,
+            "missing_measure_rows": max(0, matched_rows - included_rows) if measure else 0,
+            "value": value,
+        }],
+    }
+
+
+def guide_from_schema(
+    question: str,
+    files: dict[str, pd.DataFrame],
+    pii_columns: dict[str, set[str]] | None = None,
+) -> LocalTableAnswer | None:
+    """Describe safe, available fields and suggest grounded query shapes."""
+    if not files:
+        return None
+    tokens = _tokens(question)
+    ranked: list[tuple[int, str, pd.DataFrame]] = []
+    for filename, frame in files.items():
+        score = len(_tokens(filename) & tokens)
+        for column in frame.columns:
+            score += len(_tokens(str(column)) & tokens)
+        ranked.append((score, filename, frame))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+        names = ", ".join(filename for _, filename, _ in ranked[:6])
+        text = (
+            f"وجدت عدة ملفات أو أوراق متقاربة الصلة ({names}). حدّد اسم الملف أو الورقة حتى لا أخلط البيانات."
+            if _language_is_arabic(question) else
+            f"I found several equally relevant files or sheets ({names}). Name one source so I don't mix datasets."
+        )
+        return LocalTableAnswer(text, "", "clarify", "", 0, [], [], priority=True)
+
+    _, filename, frame = ranked[0]
+    excluded = set((pii_columns or {}).get(filename, set()))
+    safe_columns = [
+        str(column) for column in frame.columns
+        if str(column) not in excluded and _safe_column(column)
+        and str(column) not in {"PDF page", "OCR confidence", "PDF extraction method"}
+    ]
+    numeric = [column for column in safe_columns if _numeric_series(frame[column]) is not None]
+    dates = [
+        column for column in safe_columns
+        if re.search(r"(date|period|month|year|time|تاريخ|فترة|شهر|سنة)", column, re.I)
+    ]
+    categories = [
+        column for column in safe_columns
+        if column not in numeric and 1 < frame[column].nunique(dropna=True) <= 50
+    ]
+    if _language_is_arabic(question):
+        answer = (
+            f"لم أُجرِ حساباً لأن السؤال لا يحدد عملية وعموداً بوضوح في «{filename}». "
+            "يمكنني حساب العدد والإجمالي والمتوسط والأعلى/الأدنى، أو التجميع حسب فئة، "
+            "أو عرض اتجاه زمني باستخدام الأعمدة الآمنة المكتشفة."
+        )
+        detail = (
+            f"المصدر: {filename} · الصفوف: {len(frame):,}\n"
+            f"الأعمدة الرقمية: {', '.join(numeric[:12]) or 'لا يوجد'}\n"
+            f"أعمدة التاريخ/الفترة: {', '.join(dates[:8]) or 'لا يوجد'}\n"
+            f"أعمدة الفئات: {', '.join(categories[:12]) or 'لا يوجد'}\n"
+            "أمثلة: «كم سجل؟»؛ «إجمالي [اسم العمود الرقمي] حسب [عمود الفئة]»؛ "
+            "«كم سجل في [قيمة فئة موجودة]؟»."
+        )
+    else:
+        answer = (
+            f"I didn't calculate a metric because the question doesn't identify an operation and column "
+            f"unambiguously in “{filename}”. I can count, total, average, find highest/lowest values, "
+            "group by a category, or show a time trend using the detected safe columns."
+        )
+        detail = (
+            f"Source: {filename} · rows: {len(frame):,}\n"
+            f"Numeric columns: {', '.join(numeric[:12]) or 'none detected'}\n"
+            f"Date/period columns: {', '.join(dates[:8]) or 'none detected'}\n"
+            f"Category columns: {', '.join(categories[:12]) or 'none detected'}\n"
+            "Examples: “How many records?”; “Total [numeric column] by [category column]”; "
+            "“How many records have [an observed category value]?”"
+        )
+    return LocalTableAnswer(
+        answer, detail, "schema_guide", filename, len(frame), safe_columns,
+        ["No metric was calculated; guidance is based on the uploaded schema."],
+    )
+
+
 def analyze_local_question(
     question: str,
     files: dict[str, pd.DataFrame],
     pii_columns: dict[str, set[str]] | None = None,
 ) -> LocalTableAnswer | None:
-    """Answer supported aggregation questions or extractive PDF-text queries.
-
-    Returning None means the request is outside this intentionally limited
-    interpreter; callers should preserve the existing allowlisted registry,
-    knowledge search, and explicit unsupported response.
-    """
+    """Answer natural-language aggregate questions or extractive PDF queries."""
     if not files:
         return None
 
     q = unicodedata.normalize("NFKC", question).strip()
     q_tokens = _tokens(q)
     raw_tokens = set(_TOKEN.findall(q.lower()))
+    arabic = _language_is_arabic(q)
     if not q_tokens:
         return None
 
@@ -121,7 +318,9 @@ def analyze_local_question(
         "sum", "total", "average", "mean", "count", "how", "many", "highest",
         "lowest", "largest", "smallest", "top", "bottom", "rank", "group",
         "compare", "trend", "sum", "overall", "average", "أعلى", "أقل",
-        "متوسط", "مجموع", "إجمالي", "اجمالي", "عدد", "حسب", "اتجاه",
+        "متوسط", "مجموع", "إجمالي", "اجمالي", "عدد", "كم", "حسب", "اتجاه",
+        "maximum", "minimum", "max", "min", "avg", "breakdown", "distribution",
+        "توزيع", "تصنيف", "تقسيم", "الأكثر", "الاكثر", "معدل", "شهري", "سنويا",
     }
     is_document_request = bool(q_tokens & document_terms)
     has_aggregation_intent = bool(
@@ -244,44 +443,85 @@ def analyze_local_question(
                 ["PDF text retrieval uses exact term overlap and does not infer meaning."],
             )
 
-    if not has_aggregation_intent:
-        return None
-
-    count_intent = bool(raw_tokens & {"count", "many", "number", "عدد"})
-    if re.search(r"\b(where|excluding|exclude|except|greater than|less than|above|below|between|only|after|before|since|until|during|versus|vs|join|ratio|median|percentile)\b|فقط|باستثناء", q, re.I):
-        return LocalTableAnswer(
-            "I couldn't safely interpret this condition or operation; I won't report an unfiltered result. " + HELP,
-            "", "clarify", filename, len(frame), safe_columns, [], priority=True,
-        )
-
     numeric_map = {
         str(column): _numeric_series(frame[column])
         for column in safe_columns
     }
     numeric_columns = [column for column, series in numeric_map.items() if series is not None]
-    header_tokens = set().union(*(_tokens(column) for column in safe_columns)) if safe_columns else set()
-    for column in safe_columns:
-        if numeric_map[column] is not None or frame[column].nunique(dropna=True) > 100:
-            continue
-        for value in frame[column].dropna().unique():
-            words = _tokens(str(value))
-            if words and not words <= header_tokens and words <= q_tokens:
-                return LocalTableAnswer(
-                    "The question appears to select a category or date value. Row filtering is not supported in this local path yet; filter the source file first rather than relying on an unfiltered answer.",
-                    "", "clarify", filename, len(frame), safe_columns, [], priority=True,
-                )
+    category_filters, ambiguous_filters = _natural_category_filters(q, frame, safe_columns)
+    if ambiguous_filters:
+        choices = "; ".join(f"{column}: {', '.join(values[:6])}" for column, values in ambiguous_filters[:5])
+        return LocalTableAnswer(
+            "The request matches multiple observed category values. Name the exact value(s) so I don't apply the wrong filter.",
+            f"Possible values: {choices}", "clarify", filename, len(frame), safe_columns, [], priority=True,
+        )
+
+    count_intent = bool(q_tokens & _COUNT_TERMS)
+    record_question = bool(q_tokens & _RECORD_TERMS)
+    if record_question and category_filters and not count_intent:
+        count_intent = True
+        has_aggregation_intent = True
+    if not has_aggregation_intent:
+        return None
+
+    hard_filter_terms = re.compile(
+        r"\b(excluding|exclude|except|greater than|less than|above|below|between|after|before|since|until|during|versus|vs|join|ratio|median|percentile)\b"
+        r"|باستثناء|بعد|قبل|بين",
+        re.I,
+    )
+    if hard_filter_terms.search(q):
+        return LocalTableAnswer(
+            "I couldn't safely interpret this condition or operation; I won't report a partial or unfiltered result. " + HELP,
+            "", "clarify", filename, len(frame), safe_columns, [], priority=True,
+        )
+    if re.search(r"\b(where|only)\b|فقط", q, re.I) and not category_filters:
+        categories = [
+            column for column in safe_columns
+            if column not in numeric_columns and frame[column].nunique(dropna=True) <= 50
+        ]
+        return LocalTableAnswer(
+            "I couldn't match the requested filter to one exact value in the uploaded data. I won't return an unfiltered result.",
+            f"Available category columns: {', '.join(categories[:10]) or 'none detected'}",
+            "clarify", filename, len(frame), safe_columns, [], priority=True,
+        )
+    if re.search(r"\b\d{4}-\d{2}-\d{2}\b|\b\d+(?:\.\d+)?\b", q):
+        return LocalTableAnswer(
+            "The question includes a date or numeric condition that needs an explicit, unambiguous filter. Use the displayed column name and ISO dates (YYYY-MM-DD), or describe an exact observed category.",
+            HELP, "clarify", filename, len(frame), safe_columns, [], priority=True,
+        )
+
+    filtered_frame = frame
+    filter_missing_rows = 0
+    filter_audit: list[dict[str, Any]] = []
+    if category_filters:
+        mask = pd.Series(True, index=frame.index)
+        missing_mask = pd.Series(False, index=frame.index)
+        for column, operator, value in category_filters:
+            present = frame[column].notna()
+            missing_mask |= ~present
+            matches = frame[column].eq(value) if operator == "=" else frame[column].ne(value)
+            mask &= present & matches.fillna(False)
+            filter_audit.append({
+                "column": column, "operator": operator, "value": value, "kind": "category",
+            })
+        filter_missing_rows = int(missing_mask.sum())
+        filtered_frame = frame.loc[mask]
     if not numeric_columns and not count_intent:
         return LocalTableAnswer(
             "This file has no columns with enough consistently numeric values for a reliable calculation. Check the extracted columns and number formats.",
             "", "clarify", filename, len(frame), safe_columns, [],
         )
 
-    average_intent = bool(q_tokens & {"average", "mean", "typical", "متوسط"})
-    sum_intent = bool(q_tokens & {"sum", "total", "how", "much", "overall", "مجموع", "اجمالي", "إجمالي"})
-    top_intent = bool(raw_tokens & {"highest", "largest", "top", "most", "أعلى", "أكثر"})
-    bottom_intent = bool(raw_tokens & {"lowest", "smallest", "bottom", "least", "أقل"})
-    trend_intent = bool(raw_tokens & {"trend", "over", "month", "year", "time", "اتجاه"})
-    by_intent = bool(raw_tokens & {"by", "per", "each", "group", "grouped", "حسب", "لكل", "بحسب"}) or trend_intent
+    average_intent = bool(q_tokens & _AVERAGE_TERMS)
+    sum_intent = bool(q_tokens & _SUM_TERMS) or bool(raw_tokens & {"how", "much"})
+    top_intent = bool(q_tokens & _TOP_TERMS)
+    bottom_intent = bool(q_tokens & _BOTTOM_TERMS)
+    trend_intent = bool(q_tokens & _TREND_TERMS)
+    by_intent = (
+        bool(q_tokens & (_GROUP_TERMS - {"by", "per", "each"}))
+        or bool(raw_tokens & {"by", "per", "each"})
+        or trend_intent
+    )
 
     if not any((count_intent, average_intent, sum_intent, top_intent, bottom_intent, trend_intent)):
         if by_intent and _match_columns(q, frame, numeric_columns):
@@ -314,7 +554,7 @@ def analyze_local_question(
         and frame[column].nunique(dropna=True) > 1
         and frame[column].nunique(dropna=True) <= min(50, max(2, int(len(frame) ** 0.5) + 1))
     ]
-    dimensions = _match_columns(q, frame, dimension_candidates)
+    dimensions = _match_columns(q, frame, dimension_candidates) if by_intent else []
     if len(dimensions) > 1:
         return LocalTableAnswer(
             "Please name one grouping column; the question matches more than one.",
@@ -342,7 +582,7 @@ def analyze_local_question(
                 f"I couldn't identify a single date or period column for a trend. Date-like columns: {', '.join(date_columns[:10]) or 'none detected'}.",
                 "", "clarify", filename, len(frame), safe_columns, [],
             )
-        date_strings = frame[date_column].dropna().astype(str)
+        date_strings = filtered_frame[date_column].dropna().astype(str)
         ambiguous = date_strings.str.extract(r"^(\d{1,2})[/-](\d{1,2})[/-]\d{2,4}$").dropna()
         if not ambiguous.empty:
             numbers = ambiguous.astype(int)
@@ -351,52 +591,97 @@ def analyze_local_question(
                     f"The {date_column} column has ambiguous day/month dates. Convert it to YYYY-MM-DD before requesting a trend.",
                     "", "clarify", filename, len(frame), safe_columns, [], priority=True,
                 )
-        dates = pd.to_datetime(frame[date_column], errors="coerce", dayfirst=False)
+        dates = pd.to_datetime(filtered_frame[date_column], errors="coerce", dayfirst=False)
         valid = dates.notna()
         if not valid.any():
             return LocalTableAnswer(
                 f"The {date_column} column contains no reliably parseable dates.",
                 "", "clarify", filename, len(frame), safe_columns, [],
             )
-        series = numeric_map[measure] if measure else None
+        series = numeric_map[measure].loc[filtered_frame.index] if measure else None
         if series is None:
             return None
         valid = valid & series.notna()
         monthly = pd.DataFrame({"period": dates[valid].dt.to_period("M").astype(str), "value": series[valid]})
         grouped = monthly.groupby("period", sort=True)["value"].sum(min_count=1).dropna()
         detail = "\n".join(f"{period}: {value:,.2f}" for period, value in grouped.tail(12).items())
+        audit = _build_filter_audit(
+            filename, "trend", measure, frame, filtered_frame, filter_audit,
+            filter_missing_rows, int(valid.sum()),
+            value=float(series[valid].sum()) if filter_audit and not series[valid].empty else None,
+        ) if filter_audit else None
         return LocalTableAnswer(
-            f"Monthly total of {measure} from {filename} based on {int(valid.sum())} rows with valid dates. Only the 12 most recent periods are shown.",
+            (
+                f"الإجمالي الشهري لـ {measure} من {filename} استناداً إلى {int(valid.sum())} صفاً بتواريخ صالحة. "
+                "يُعرض أحدث 12 فترة فقط."
+                if arabic else
+                f"Monthly total of {measure} from {filename} based on {int(valid.sum())} rows with valid dates. Only the 12 most recent periods are shown."
+            ),
             detail, "trend", filename, int(valid.sum()), safe_columns, numeric_warnings,
+            query_audit=audit,
         )
 
     if count_intent and measure is None:
         if dimension is None:
+            count = len(filtered_frame)
+            audit = _build_filter_audit(
+                filename, "count", None, frame, filtered_frame, filter_audit,
+                filter_missing_rows, count, count,
+            ) if filter_audit else None
             return LocalTableAnswer(
-                f"Record count in {filename}: {len(frame):,} rows.",
-                f"{len(frame):,} rows · {len(safe_columns)} non-sensitive columns",
-                "count", filename, len(frame), safe_columns, [],
+                (
+                    f"عدد السجلات في {filename}: {count:,} صف."
+                    if arabic else f"Record count in {filename}: {count:,} rows."
+                ),
+                (
+                    f"{count:,} صف · {len(safe_columns)} أعمدة غير حساسة"
+                    if arabic else f"{count:,} rows · {len(safe_columns)} non-sensitive columns"
+                ),
+                "count", filename, count, safe_columns, [], query_audit=audit,
             )
-        counts = frame.groupby(dimension, dropna=True).size().sort_values(ascending=False).head(12)
+        counts = filtered_frame.groupby(dimension, dropna=True).size().sort_values(ascending=False).head(12)
         detail = "\n".join(f"{key}: {int(value):,} rows" for key, value in counts.items())
+        audit = _build_filter_audit(
+            filename, "count_by", None, frame, filtered_frame, filter_audit,
+            filter_missing_rows, len(filtered_frame),
+        ) if filter_audit else None
         return LocalTableAnswer(
-            f"Record counts grouped by {dimension} in {filename}. Showing up to 12 groups.",
-            detail, "count_by", filename, len(frame), safe_columns, [],
+            (
+                f"عدد السجلات حسب {dimension} في {filename}. يُعرض ما يصل إلى 12 مجموعة."
+                if arabic else f"Record counts grouped by {dimension} in {filename}. Showing up to 12 groups."
+            ),
+            (
+                "\n".join(f"{key}: {int(value):,} صف" for key, value in counts.items())
+                if arabic else detail
+            ),
+            "count_by", filename, len(filtered_frame), safe_columns, [],
+            query_audit=audit,
         )
 
-    values = numeric_map[measure]
+    values = numeric_map[measure].loc[filtered_frame.index]
     if dimension:
-        reduced = pd.DataFrame({"group": frame[dimension], "value": values})
+        reduced = pd.DataFrame({"group": filtered_frame[dimension], "value": values})
         aggregation = "mean" if average_intent else "sum"
         groups = reduced.groupby("group", dropna=True)["value"]
         grouped = (groups.mean() if aggregation == "mean" else groups.sum(min_count=1)).dropna()
         grouped = grouped.sort_values(ascending=not (top_intent or bottom_intent)) if not (top_intent or bottom_intent) else grouped.sort_values(ascending=bottom_intent)
         grouped = grouped.head(12)
         detail = "\n".join(f"{key}: {value:,.2f}" for key, value in grouped.items())
+        audit = _build_filter_audit(
+            filename, "grouped_average" if average_intent else "grouped_total",
+            measure, frame, filtered_frame, filter_audit, filter_missing_rows,
+            int(values.notna().sum()),
+        ) if filter_audit else None
         return LocalTableAnswer(
-            f"{'Average' if average_intent else 'Total'} {measure} grouped by {dimension} in {filename}. Showing up to 12 groups.",
+            (
+                f"{'متوسط' if average_intent else 'إجمالي'} {measure} حسب {dimension} في {filename}. "
+                "يُعرض ما يصل إلى 12 مجموعة."
+                if arabic else
+                f"{'Average' if average_intent else 'Total'} {measure} grouped by {dimension} in {filename}. Showing up to 12 groups."
+            ),
             detail, "grouped_average" if average_intent else "grouped_total",
             filename, int(values.notna().sum()), safe_columns, numeric_warnings,
+            query_audit=audit,
         )
 
     if top_intent or bottom_intent:
@@ -407,9 +692,23 @@ def analyze_local_question(
     else:
         value, operation = values.sum(), "total"
 
-    labels = {"maximum": "Maximum", "minimum": "Minimum", "average": "Average", "total": "Total"}
+    labels = (
+        {"maximum": "القيمة الأعلى", "minimum": "القيمة الأدنى", "average": "المتوسط", "total": "الإجمالي"}
+        if arabic else
+        {"maximum": "Maximum", "minimum": "Minimum", "average": "Average", "total": "Total"}
+    )
+    audit = _build_filter_audit(
+        filename, operation, measure, frame, filtered_frame, filter_audit,
+        filter_missing_rows, int(values.notna().sum()),
+        value=float(value) if pd.notna(value) else None,
+    ) if filter_audit else None
     return LocalTableAnswer(
-        f"{labels[operation]} {measure} in {filename} from {int(values.notna().sum())} numeric records.",
+        (
+            f"{labels[operation]} لـ {measure} في {filename} استناداً إلى {int(values.notna().sum())} قيمة رقمية."
+            if arabic else
+            f"{labels[operation]} {measure} in {filename} from {int(values.notna().sum())} numeric records."
+        ),
         f"{labels[operation]} {measure}: {value:,.2f}",
         operation, filename, int(values.notna().sum()), safe_columns, numeric_warnings,
+        query_audit=audit,
     )
