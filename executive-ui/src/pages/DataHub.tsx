@@ -294,7 +294,7 @@ export function DataHub() {
   ] as const
 
   return (
-    <main dir={isAr ? 'rtl' : 'ltr'} className="min-h-[100dvh] space-y-6 pb-10 text-slate-100">
+    <main dir={isAr ? 'rtl' : 'ltr'} className="data-hub-page min-h-[100dvh] space-y-6 pb-10 text-slate-100">
       <motion.header initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="relative overflow-hidden rounded-3xl border border-[#5378ac]/35 bg-[linear-gradient(115deg,#202447_0%,#252b55_64%,#283856_100%)] p-5 sm:p-7">
         <div className="pointer-events-none absolute -right-8 -top-20 h-64 w-64 rounded-full border border-[#72c6a3]/10" />
         <div className="pointer-events-none absolute -right-1 -top-12 h-48 w-48 rounded-full border border-[#72c6a3]/10" />

@@ -45,6 +45,39 @@ _RECORD_TERMS = {
     "staff", "person", "people", "records", "rows", "عقد", "عقود", "موظف",
     "موظفين", "عامل", "عمال", "سجل", "سجلات",
 }
+_SEMANTIC_ALIASES = {
+    "payroll": (
+        "payroll", "salary", "salaries", "wage", "wages", "compensation",
+        "إجمالي الرواتب", "الرواتب", "راتب", "أجور",
+    ),
+    "expense": (
+        "expense", "expenses", "cost", "costs", "spend", "spending",
+        "expenditure", "مصروف", "مصروفات", "مصاريف", "تكلفة", "تكاليف",
+        "إنفاق",
+    ),
+    "profit": ("profit", "profits", "ربح", "أرباح", "الربح"),
+    "net_profit": (
+        "net profit", "net income", "صافي الربح", "الربح الصافي", "صافي الدخل",
+    ),
+    "revenue": (
+        "revenue", "sales", "turnover", "income", "مبيعات", "إيراد",
+        "إيرادات", "دخل", "عائد",
+    ),
+    "amount": ("amount", "value", "مبلغ", "مبالغ", "قيمة", "قيم"),
+    "department": (
+        "department", "dept", "division", "business unit", "team",
+        "قسم", "أقسام", "إدارة", "إدارات", "قطاع",
+    ),
+    "category": (
+        "category", "classification", "class", "type", "فئة", "فئات",
+        "تصنيف", "نوع",
+    ),
+    "headcount": (
+        "headcount", "employee count", "staff count", "employees", "employee",
+        "staff", "عدد الموظفين", "موظف", "موظفين", "عاملين",
+    ),
+}
+_FINANCIAL_MEASURE_CONCEPTS = {"payroll", "expense", "profit", "net_profit", "revenue"}
 _SENSITIVE = re.compile(
     r"(?:^|[^a-z0-9])(?:name|employee|person|phone|mobile|email|address|"
     r"national.?id|iqama|passport|iban|bank.?account|account.?number|"
@@ -100,6 +133,15 @@ def _safe_column(name: Any) -> bool:
     return not _SENSITIVE.search(str(name))
 
 
+def _semantic_concepts(text: str) -> set[str]:
+    tokens = _tokens(text)
+    return {
+        concept
+        for concept, aliases in _SEMANTIC_ALIASES.items()
+        if any(_tokens(alias) <= tokens for alias in aliases)
+    }
+
+
 def _numeric_series(series: pd.Series) -> pd.Series | None:
     if pd.api.types.is_numeric_dtype(series):
         result = pd.to_numeric(series, errors="coerce")
@@ -121,6 +163,7 @@ def _numeric_series(series: pd.Series) -> pd.Series | None:
 
 def _match_columns(question: str, frame: pd.DataFrame, columns: list[str]) -> list[str]:
     asked = _tokens(question)
+    asked_concepts = _semantic_concepts(question)
     ranked: list[tuple[int, int, str]] = []
     for column in columns:
         words = _tokens(str(column))
@@ -128,9 +171,21 @@ def _match_columns(question: str, frame: pd.DataFrame, columns: list[str]) -> li
             continue
         overlap = len(words & asked)
         if words <= asked:
-            ranked.append((2, overlap, column))
+            ranked.append((3, overlap, column))
         elif overlap:
-            ranked.append((1, overlap, column))
+            ranked.append((2, overlap, column))
+        else:
+            semantic_overlap = len(_semantic_concepts(str(column)) & asked_concepts)
+            if semantic_overlap:
+                ranked.append((1, semantic_overlap, column))
+            elif (
+                len(columns) == 1
+                and _semantic_concepts(str(column)) & {"amount"}
+                and asked_concepts & _FINANCIAL_MEASURE_CONCEPTS
+            ):
+                # A generic money field may stand in for the requested financial
+                # concept only when it is the sole eligible numeric measure.
+                ranked.append((0, 1, column))
     if not ranked:
         return []
     best = max((exact, overlap) for exact, overlap, _ in ranked)
@@ -157,14 +212,22 @@ def _natural_category_filters(
         raw_words & {"by", "per", "each"}
     )
     explicit_filter_cue = bool(
-        raw_words & {"for", "in", "where", "only", "with"}
+        raw_words & {"for", "in", "where", "only", "with", "في", "لدى", "فقط"}
         or asked & {"في", "فقط", "لدى", "ل"}
     )
-    measure_tokens = set().union(*(
-        _tokens(str(column))
-        for column in columns
+    numeric_columns = [
+        str(column) for column in columns
         if _numeric_series(frame[column]) is not None
-    )) if grouping_intent and columns else set()
+    ]
+    matched_measures = _match_columns(question, frame, numeric_columns) if numeric_columns else []
+    measure_tokens = set().union(*(_tokens(column) for column in matched_measures)) if matched_measures else set()
+    if len(matched_measures) == 1 and _semantic_concepts(matched_measures[0]) & {"amount"}:
+        requested_financial_concepts = _semantic_concepts(question) & _FINANCIAL_MEASURE_CONCEPTS
+        measure_tokens |= set().union(*(
+            _tokens(alias)
+            for concept in requested_financial_concepts
+            for alias in _SEMANTIC_ALIASES[concept]
+        )) if requested_financial_concepts else set()
     negative = bool(asked & {"not", "without", "غير", "ليس", "ليست", "بدون"})
     candidates: dict[str, set[str]] = {}
     for column in columns:
@@ -351,9 +414,19 @@ def analyze_local_question(
         "توزيع", "تصنيف", "تقسيم", "الأكثر", "الاكثر", "معدل", "شهري", "سنويا",
     }
     is_document_request = bool(q_tokens & document_terms)
+    explanatory_terms = {
+        "define", "definition", "meaning", "explain", "means",
+        "تعريف", "معنى", "اشرح", "يعني",
+    }
+    financial_question = bool(
+        _semantic_concepts(q) & _FINANCIAL_MEASURE_CONCEPTS
+        and not (q_tokens & explanatory_terms)
+        and not is_document_request
+    )
     has_aggregation_intent = bool(
         (q_tokens & aggregate_words)
         or (raw_tokens & {"by", "per", "each", "group", "grouped", "trend", "حسب", "لكل"})
+        or financial_question
     )
     if has_aggregation_intent and not is_document_request and any(
         frame.attrs.get("pdf_extraction", {}).get("requires_numeric_review")
@@ -576,6 +649,10 @@ def analyze_local_question(
         bool(q_tokens & _SUM_TERMS)
         or bool(raw_tokens & {"how", "much"})
         or arabic_sum_intent
+        or (
+            financial_question
+            and not any((count_intent, average_intent, top_intent, bottom_intent, trend_intent))
+        )
     )
     top_intent = bool(q_tokens & _TOP_TERMS)
     bottom_intent = bool(q_tokens & _BOTTOM_TERMS)
@@ -593,6 +670,11 @@ def analyze_local_question(
             return None
 
     matched_numeric = _match_columns(q, frame, numeric_columns)
+    generic_measure_fallback = bool(
+        len(matched_numeric) == 1
+        and _semantic_concepts(matched_numeric[0]) & {"amount"}
+        and _semantic_concepts(q) & _FINANCIAL_MEASURE_CONCEPTS
+    )
     if len(matched_numeric) > 1:
         return LocalTableAnswer(
             _localized(
@@ -623,6 +705,12 @@ def analyze_local_question(
         excluded_rows = len(frame) - int(numeric_map[measure].notna().sum())
         if excluded_rows:
             numeric_warnings.append(f"{excluded_rows:,} row(s) with missing or non-numeric {measure} were excluded.")
+    if generic_measure_fallback and measure is not None:
+        numeric_warnings.append(_localized(
+            q,
+            f"Only one eligible numeric column ({measure}) was available, so it was used as the requested financial measure. Confirm this mapping before acting.",
+            f"لم يتوفر سوى عمود رقمي واحد ({measure})، لذا استُخدم للمقياس المالي المطلوب. تحقّق من هذا الربط قبل اتخاذ إجراء.",
+        ))
     dimension_candidates = [
         column for column in safe_columns
         if column not in numeric_columns and column not in (pii_columns or {}).get(filename, set())

@@ -13,11 +13,8 @@
  * number/table alongside the prose (never prose alone), the mode that
  * answered (cloud agent / local LLM / deterministic fallback / documentation
  * / refused) is always visible, any tool the agent actually invoked is
- * listed as "Actions Taken", and the Evidence Level badge uses this
- * platform's established 🟢/🟡/🔴 convention — never an LLM self-reported
- * confidence score. See backend/core/ai_business_analyst_engine.py's and
- * backend/core/agentic_orchestrator.py's module docstrings for the full
- * trust-boundary architecture this page surfaces.
+ * listed as "Actions Taken", and the Evidence Level badge uses a clear
+ * non-verbal status marker, never an LLM self-reported confidence score.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -200,10 +197,10 @@ interface EditTurn {
   loading: boolean
 }
 
-const EVIDENCE_BADGE: Record<string, { tone: 'positive' | 'caution' | 'critical'; icon: string }> = {
-  high: { tone: 'positive', icon: '🟢' },
-  limited: { tone: 'caution', icon: '🟡' },
-  insufficient: { tone: 'critical', icon: '🔴' },
+const EVIDENCE_BADGE: Record<string, { tone: 'positive' | 'caution' | 'critical'; marker: string }> = {
+  high: { tone: 'positive', marker: 'bg-emerald-400' },
+  limited: { tone: 'caution', marker: 'bg-amber-300' },
+  insufficient: { tone: 'critical', marker: 'bg-rose-400' },
 }
 const MODE_LABEL_EN: Record<string, string> = {
   llm: 'Local LLM', deterministic: 'Deterministic fallback', rag: 'Project documentation',
@@ -355,7 +352,7 @@ export function AIBusinessAnalyst() {
   }, [editTurns])
 
   return (
-    <div className="space-y-7">
+    <div dir={isAr ? 'rtl' : 'ltr'} className="analyst-page min-h-[100dvh] space-y-6 rounded-2xl p-1 pb-8 sm:space-y-7">
       <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
         <h1 className="text-headline text-slate-900 dark:text-white flex items-center gap-2">
           <Bot size={26} className="text-blue-500" />
@@ -647,7 +644,7 @@ function AnswerCard({ response, t, isAr }: { response: AskResponse; t: (en: stri
     <div className="max-w-[92%] card p-4 space-y-3 border-l-4" style={{ borderLeftColor: a.mode === 'refused' ? '#dc2626' : a.evidence_level === 'high' ? '#059669' : a.evidence_level === 'limited' ? '#d97706' : '#dc2626' }}>
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
-          <StatusBadge tone={badge.tone}>{badge.icon} {t(a.evidence_level === 'high' ? 'High Evidence' : a.evidence_level === 'limited' ? 'Limited Evidence' : 'Insufficient Data', a.evidence_level === 'high' ? 'أدلة قوية' : a.evidence_level === 'limited' ? 'أدلة محدودة' : 'بيانات غير كافية')}</StatusBadge>
+          <StatusBadge tone={badge.tone}><span aria-hidden="true" className={`inline-block h-2 w-2 rounded-full ${badge.marker}`} /> {t(a.evidence_level === 'high' ? 'High Evidence' : a.evidence_level === 'limited' ? 'Limited Evidence' : 'Insufficient Data', a.evidence_level === 'high' ? 'أدلة قوية' : a.evidence_level === 'limited' ? 'أدلة محدودة' : 'بيانات غير كافية')}</StatusBadge>
           <span className="text-[11px] text-slate-400">{modeLabel}</span>
         </div>
         {a.mode === 'refused' && <AlertTriangle size={16} className="text-red-500" />}

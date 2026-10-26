@@ -331,7 +331,7 @@ export function WorkforceScenarioStudio({
   }
 
   return (
-    <section dir={isAr ? 'rtl' : 'ltr'} className="space-y-4 text-slate-100" aria-labelledby="scenario-studio-title">
+    <section dir={isAr ? 'rtl' : 'ltr'} className="scenario-studio-page space-y-4 text-slate-100" aria-labelledby="scenario-studio-title">
       <header className={`${panel} relative overflow-hidden p-5 sm:p-6`}>
         <div className="pointer-events-none absolute -top-20 end-10 h-52 w-52 rounded-full border border-[#72c6a3]/10" />
         <div className="pointer-events-none absolute -top-12 end-6 h-36 w-36 rounded-full border border-[#72c6a3]/10" />
