@@ -8,7 +8,7 @@ import pandas as pd
 
 from backend.core.ai_business_analyst_engine import answer_question
 from backend.core.excel_ingestion_engine import ExcelIngestionEngine
-from backend.core.local_question_engine import analyze_local_question
+from backend.core.local_question_engine import analyze_local_question, resolve_local_follow_up
 
 
 def _simple_searchable_pdf(text: str | list[str]) -> bytes:
@@ -270,6 +270,74 @@ class LocalFileAnalyticsTests(unittest.TestCase):
         self.assertEqual(answer.operation, "total")
         self.assertIn("Net Income", answer.detail)
         self.assertIn("100.00", answer.detail)
+
+    def test_follow_up_grouping_and_category_filter_reuse_only_prior_local_intent(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Operations", "Finance", "Operations"],
+            "Payroll": [10.0, 20.0, 30.0],
+        })
+        grouped_question = resolve_local_follow_up("And by department?", "Total Payroll")
+        grouped = analyze_local_question(grouped_question, {"costs.csv": frame})
+        self.assertEqual(grouped.operation, "grouped_total")
+        self.assertIn("Operations: 40.00", grouped.detail)
+
+        filtered_question = resolve_local_follow_up("What about Finance?", "Total Payroll by department")
+        filtered = analyze_local_question(filtered_question, {"costs.csv": frame})
+        self.assertEqual(filtered.operation, "grouped_total")
+        self.assertEqual(filtered.detail, "Finance: 20.00")
+        self.assertEqual(resolve_local_follow_up("What is attrition?", "Total Payroll"), "What is attrition?")
+
+    def test_arabic_follow_up_keeps_local_query_bounded(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["التشغيل", "المالية"],
+            "Payroll": [100.0, 200.0],
+        })
+        resolved = resolve_local_follow_up("حسب القسم", "إجمالي الرواتب")
+        answer = analyze_local_question(resolved, {"الرواتب.csv": frame})
+        self.assertEqual(answer.operation, "grouped_total")
+        self.assertIn("200.00", answer.detail)
+
+    def test_multi_intent_returns_separate_auditable_results_and_fails_closed(self) -> None:
+        frame = pd.DataFrame({
+            "Department": ["Operations", "Finance", "Operations"],
+            "Payroll": [10.0, 20.0, 30.0],
+        })
+        answer = analyze_local_question(
+            "Total Payroll by Department; average Payroll by Department",
+            {"costs.csv": frame},
+        )
+        self.assertEqual(answer.operation, "multi_intent")
+        self.assertIn("Operations: 40.00", answer.detail)
+        self.assertIn("Operations: 20.00", answer.detail)
+        self.assertEqual(len(answer.query_audit["subqueries"]), 2)
+        self.assertIn("independently", answer.warnings[0])
+
+        arabic = analyze_local_question(
+            "إجمالي الرواتب حسب القسم؛ متوسط الرواتب حسب القسم",
+            {"costs.csv": frame},
+        )
+        self.assertEqual(arabic.operation, "multi_intent")
+        self.assertIn("Finance: 20.00", arabic.detail)
+
+        partial = analyze_local_question(
+            "Total Payroll by Department; average Unknown Metric by Department",
+            {"costs.csv": frame},
+        )
+        self.assertEqual(partial.operation, "clarify")
+        self.assertNotIn("Operations: 40.00", partial.detail)
+        self.assertIn("No partial", partial.warnings[0])
+
+    def test_schema_typo_suggests_but_never_applies_fuzzy_measure_mapping(self) -> None:
+        frame = pd.DataFrame({
+            "Annual Payroll": [100.0, 200.0],
+            "Headcount": [4, 5],
+        })
+        answer = analyze_local_question("Total Annul Payrol", {"workforce.csv": frame})
+        self.assertEqual(answer.operation, "clarify")
+        self.assertTrue(answer.priority)
+        self.assertIn("Annual Payroll", answer.detail)
+        self.assertIn("suggestion only", answer.detail)
+        self.assertIn("No fuzzy schema mapping was applied", answer.warnings[0])
 
     def test_arabic_top_costs_groups_by_department(self) -> None:
         frame = pd.DataFrame({

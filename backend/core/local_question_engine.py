@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import re
+import difflib
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -136,6 +137,103 @@ def _localized(question: str, english: str, arabic: str) -> str:
     return arabic if _language_is_arabic(question) else english
 
 
+def resolve_local_follow_up(question: str, previous_question: str | None) -> str:
+    """Carry prior intent only for an explicit, bounded filter/grouping follow-up.
+
+    This is request-scoped text composition, not stored conversation state.
+    It never overrides a new explicit measure or aggregation in the current turn.
+    """
+    current = unicodedata.normalize("NFKC", str(question or "")).strip()
+    previous = unicodedata.normalize("NFKC", str(previous_question or "")).strip()
+    if not current or not previous or len(current) > 300 or len(previous) > 500:
+        return current
+
+    intent_terms = (
+        _COUNT_TERMS | _SUM_TERMS | _AVERAGE_TERMS | _TOP_TERMS
+        | _BOTTOM_TERMS | _TREND_TERMS
+    )
+    if _tokens(current) & intent_terms or _semantic_concepts(current) & (
+        _FINANCIAL_MEASURE_CONCEPTS | {"headcount"}
+    ):
+        return current
+    if not (
+        _tokens(previous) & intent_terms
+        or _semantic_concepts(previous) & (_FINANCIAL_MEASURE_CONCEPTS | {"headcount"})
+    ):
+        return current
+
+    fragment = current.strip(" \t\r\n?؟.!،,;")
+    connector = ""
+    continuation_patterns = (
+        (r"^(?:(?:and|also)\s+)?(?:what about|how about|same for)\s+", "category"),
+        (r"^(?:and|also)\s+", "conjunction"),
+        (r"^(?:و)?(?:ماذا عن|ما عن|نفس الشيء عن|نفس الأمر عن)\s*", "category_ar"),
+        (r"^(?:و)?(?:وكذلك|أيضا|أيضاً)\s*", "conjunction_ar"),
+    )
+    for pattern, kind in continuation_patterns:
+        match = re.match(pattern, fragment, re.I)
+        if match:
+            connector = kind
+            fragment = fragment[match.end():].strip()
+            break
+    # Drop the attached Arabic conjunction before a standalone grouping/filter
+    # cue (e.g. "وبحسب القسم") without splitting ordinary Arabic words.
+    fragment = re.sub(r"^و(?=(?:حسب|بحسب|في|لدى|فقط|أيضا|أيضاً))", "", fragment)
+    if not fragment:
+        return current
+
+    fragment_tokens = _tokens(fragment)
+    raw_words = set(_TOKEN.findall(fragment.lower()))
+    has_group_cue = bool(
+        fragment_tokens & (_GROUP_TERMS - {"by", "per", "each"})
+        or raw_words & {"by", "per", "each", "حسب", "بحسب", "لكل", "كل"}
+    )
+    has_filter_cue = bool(
+        re.search(r"\b(?:where|only|for|in|with)\b", fragment, re.I)
+        or re.search(r"(?<![\u0600-\u06ff])(?:في|لدى|فقط)(?![\u0600-\u06ff])", fragment)
+    )
+    if not (has_group_cue or has_filter_cue):
+        if connector not in {"category", "category_ar", "conjunction", "conjunction_ar"}:
+            return current
+        if _semantic_concepts(fragment) & (_FINANCIAL_MEASURE_CONCEPTS | {"headcount"}):
+            return current
+        fragment = f"في {fragment}" if _language_is_arabic(current) else f"for {fragment}"
+
+    resolved = f"{previous.rstrip(' ?؟.!،,;')} {fragment}".strip()
+    return resolved if len(resolved) <= 900 else current
+
+
+def _split_multi_intent_question(question: str) -> list[str]:
+    """Split only explicit separators; never guess from a generic word 'and/و'."""
+    normalized = unicodedata.normalize("NFKC", question or "")
+    normalized = _ARABIC_MARKS.sub("", normalized)
+    parts = re.split(
+        r"\s*(?:[;؛]|\n+|\b(?:and also|also|plus|as well as)\b|"
+        r"(?<![\u0600-\u06ff])(?:وكذلك|وايضا|و?أيضا)(?![\u0600-\u06ff]))\s*",
+        normalized,
+        flags=re.I,
+    )
+    clauses = [part.strip(" \t\r\n?؟.!،,") for part in parts if part.strip(" \t\r\n?؟.!،,")]
+    if len(clauses) <= 1:
+        return []
+    independent_intents = (
+        _COUNT_TERMS | _SUM_TERMS | _AVERAGE_TERMS | _TOP_TERMS
+        | _BOTTOM_TERMS | _TREND_TERMS | {"compare", "correlate", "correlation"}
+    )
+    # Require each piece to be a complete analytical intent. This prevents a
+    # semicolon followed by SQL/commands from being reinterpreted as a valid
+    # multi-question request.
+    if any(
+        not (
+            _tokens(clause) & independent_intents
+            or _semantic_concepts(clause) & _FINANCIAL_MEASURE_CONCEPTS
+        )
+        for clause in clauses
+    ):
+        return []
+    return clauses
+
+
 def _safe_column(name: Any) -> bool:
     return not _SENSITIVE.search(str(name))
 
@@ -203,6 +301,37 @@ def _match_columns(question: str, frame: pd.DataFrame, columns: list[str]) -> li
         return []
     best = max((exact, overlap) for exact, overlap, _ in ranked)
     return [column for exact, overlap, column in ranked if (exact, overlap) == best]
+
+
+def _suggest_numeric_columns(question: str, columns: list[str]) -> list[str]:
+    """Suggest near-matching safe measures without ever applying a fuzzy mapping."""
+    query_tokens = _tokens(question)
+    control_terms = (
+        _COUNT_TERMS | _SUM_TERMS | _AVERAGE_TERMS | _TOP_TERMS | _BOTTOM_TERMS
+        | _TREND_TERMS | _GROUP_TERMS | {"how", "much", "what", "is", "are", "please"}
+    )
+    query_tokens -= control_terms
+    if not query_tokens:
+        return []
+    query_text = " ".join(sorted(query_tokens))
+    scored: list[tuple[float, str]] = []
+    for column in columns:
+        column_tokens = _tokens(str(column))
+        if not column_tokens:
+            continue
+        column_text = " ".join(sorted(column_tokens))
+        token_overlap = len(query_tokens & column_tokens) / max(len(query_tokens), len(column_tokens))
+        whole_similarity = difflib.SequenceMatcher(None, query_text, column_text).ratio()
+        token_similarity = max(
+            (difflib.SequenceMatcher(None, query, candidate).ratio()
+             for query in query_tokens for candidate in column_tokens),
+            default=0.0,
+        )
+        score = max(token_overlap, whole_similarity, token_similarity * 0.85)
+        if score >= 0.58:
+            scored.append((score, str(column)))
+    scored.sort(key=lambda item: (-item[0], item[1].casefold()))
+    return [column for _score, column in scored[:3]]
 
 
 def _natural_category_filters(
@@ -416,6 +545,73 @@ def analyze_local_question(
     arabic = _language_is_arabic(q)
     if not q_tokens:
         return None
+    clauses = _split_multi_intent_question(q)
+    if clauses:
+        if len(clauses) > 3:
+            return LocalTableAnswer(
+                _localized(
+                    q,
+                    "I can safely answer up to three explicit subquestions at a time. Separate each complete question with a semicolon.",
+                    "يمكنني الإجابة بأمان عن ثلاثة أسئلة فرعية واضحة كحد أقصى. افصل بين كل سؤال مكتمل بفاصلة منقوطة.",
+                ),
+                "", "clarify", "", 0, [], [], priority=True,
+            )
+        subresults = [analyze_local_question(clause, files, pii_columns) for clause in clauses]
+        unsupported = [
+            (clause, result) for clause, result in zip(clauses, subresults)
+            if result is None or result.operation in {"clarify", "schema_guide", "document_search"}
+        ]
+        if unsupported:
+            details = "\n".join(
+                f"{index}. {clause}: {result.text if result else 'No safe local operation matched.'}"
+                for index, (clause, result) in enumerate(unsupported, 1)
+            )
+            return LocalTableAnswer(
+                _localized(
+                    q,
+                    "I couldn't safely answer every part, so I did not return partial totals. Clarify the listed subquestion(s) and try again.",
+                    "تعذر الإجابة بأمان عن جميع الأجزاء، لذلك لم أعرض إجماليات جزئية. وضّح الأسئلة الفرعية المذكورة ثم أعد المحاولة.",
+                ),
+                details, "clarify", "", 0, [], ["No partial multi-intent result was returned."], priority=True,
+            )
+        results = [result for result in subresults if result is not None]
+        answer_text = "\n".join(
+            f"{index}. {result.text}"
+            for index, result in enumerate(results, 1)
+        )
+        detail = "\n\n".join(
+            f"{index}. {clause}\nSource: {result.source_file or 'uploaded data'} · "
+            f"Rows: {result.rows}\n{result.detail or result.text}"
+            for index, (clause, result) in enumerate(zip(clauses, results), 1)
+        )
+        unique_columns = list(dict.fromkeys(column for result in results for column in result.columns))
+        return LocalTableAnswer(
+            _localized(
+                q,
+                f"Answered {len(results)} separate questions using local calculations. Each result is independent.",
+                f"تمت الإجابة عن {len(results)} أسئلة منفصلة باستخدام حسابات محلية. كل نتيجة مستقلة.",
+            ) + "\n" + answer_text,
+            detail, "multi_intent", "", 0, unique_columns,
+            ["Each subquestion was calculated independently. Do not add overlapping cohorts or totals."],
+            query_audit={
+                "source_file": "Multiple local queries",
+                "operation": "multi_intent",
+                "measure": None,
+                "currency": None,
+                "cohorts": [],
+                "subqueries": [
+                    {
+                        "question": clause,
+                        "operation": result.operation,
+                        "source_file": result.source_file,
+                        "rows": result.rows,
+                        "measure": (result.query_audit or {}).get("measure"),
+                        "cohorts": (result.query_audit or {}).get("cohorts", []),
+                    }
+                    for clause, result in zip(clauses, results)
+                ],
+            },
+        )
 
     document_terms = {"summarize", "summary", "document", "document says", "text", "اكتب", "لخص", "لخصي", "المستند", "الوثيقة"}
     aggregate_words = {
@@ -723,13 +919,24 @@ def analyze_local_question(
             "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
     if not matched_numeric and not count_intent:
+        suggestions = _suggest_numeric_columns(q, numeric_columns)
+        suggestion_detail = (
+            _localized(
+                q,
+                f"Possible numeric columns (suggestion only; not used): {', '.join(suggestions)}",
+                f"أعمدة رقمية محتملة (اقتراح فقط؛ لم تُستخدم في الحساب): {', '.join(suggestions)}",
+            )
+            if suggestions else ""
+        )
         return LocalTableAnswer(
             _localized(
                 q,
                 f"Please name the measure to calculate. Numeric columns: {', '.join(numeric_columns[:10])}",
                 f"حدّد المقياس المطلوب حسابه. الأعمدة الرقمية: {', '.join(numeric_columns[:10])}",
             ),
-            "", "clarify", filename, len(frame), safe_columns, [],
+            suggestion_detail, "clarify", filename, len(frame), safe_columns,
+            ["No fuzzy schema mapping was applied; confirm a suggested column before calculation."] if suggestions else [],
+            priority=True,
         )
 
     measure = None if count_intent else (matched_numeric[0] if matched_numeric else None)

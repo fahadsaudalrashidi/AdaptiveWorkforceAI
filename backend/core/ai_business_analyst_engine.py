@@ -1121,7 +1121,8 @@ def _local_file_answer(result: LocalTableAnswer) -> AnalystAnswer:
             f"Analyzed {result.rows:,} row(s) from this selected file/sheet; excluded detected personal-data columns."
         )
     if result.query_audit:
-        for i, cohort in enumerate(result.query_audit["cohorts"], 1):
+        cohorts = result.query_audit.get("cohorts", [])
+        for i, cohort in enumerate(cohorts, 1):
             filters = "; ".join(
                 f'{f["column"]} {f["operator"]} {f["value"]}' for f in cohort["filters"]
             )
@@ -1132,7 +1133,8 @@ def _local_file_answer(result: LocalTableAnswer) -> AnalystAnswer:
                 f'{cohort["missing_filter_rows"]} source rows have missing filter values; '
                 f'{cohort["missing_measure_rows"]} matched rows have missing measure values.'
             )
-        limitations.append("Missing filter values never match, including !=. Comparison cohorts may overlap; no currency conversion is performed.")
+        if cohorts:
+            limitations.append("Missing filter values never match, including !=. Comparison cohorts may overlap; no currency conversion is performed.")
     return AnalystAnswer(
         answer_text=result.text, key_evidence=evidence,
         source_engine=source_engine,

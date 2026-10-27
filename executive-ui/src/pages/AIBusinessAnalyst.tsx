@@ -49,7 +49,7 @@ type EvidenceEntryJSON = ComputedMetricEvidenceJSON | KnowledgeContextEvidenceJS
 
 interface QueryAuditJSON {
   source_file: string
-  operation: 'total' | 'average' | 'count'
+  operation: 'total' | 'average' | 'count' | 'multi_intent'
   measure: string | null
   currency: string | null
   cohorts: {
@@ -61,6 +61,14 @@ interface QueryAuditJSON {
     missing_filter_rows: number
     missing_measure_rows: number
     value: number | null
+  }[]
+  subqueries?: {
+    question: string
+    operation: string
+    source_file: string
+    rows: number
+    measure: string | null
+    cohorts: QueryAuditJSON['cohorts']
   }[]
 }
 
@@ -224,6 +232,10 @@ function fmtValue(value: unknown, unit: string | null): string {
   return unit ? `${text} ${unit}` : text
 }
 
+function sameFileSelection(left: File[], right: File[]): boolean {
+  return left.length === right.length && left.every((file) => right.includes(file))
+}
+
 export function AIBusinessAnalyst() {
   const { t, isAr } = useLanguage()
   const [mode, setMode] = useState<'ask' | 'edit'>('ask')
@@ -285,6 +297,16 @@ export function AIBusinessAnalyst() {
   const runQuestion = useCallback(async (q: string, selectedFiles: File[], reviews: ReviewedTable[] = []) => {
     q = q.trim()
     if (!q) return
+    const hasSelectedFiles = selectedFiles.length > 0
+    const previousTurn = !useCloud && !reviews.length && hasSelectedFiles
+      ? [...turns].reverse().find((turn) => {
+        if (!turn.response || turn.response.mode !== 'local_fallback' || !sameFileSelection(turn.sourceFiles, selectedFiles)) return false
+        if (!('key_evidence' in turn.response.answer)) return false
+        return turn.response.answer.mode === 'tabular'
+          && turn.response.answer.evidence_level !== 'insufficient'
+          && turn.response.answer.query_audit?.operation !== 'multi_intent'
+      })
+      : undefined
     const turnId = crypto.randomUUID()
     const hasPdf = selectedFiles.some((file) => file.name.toLowerCase().endsWith('.pdf'))
     setTurns((prev) => [...prev, { id: turnId, question: q, response: null, error: null, loading: true, hasPdf, sourceFiles: selectedFiles, ocrProgress: null }])
@@ -296,6 +318,7 @@ export function AIBusinessAnalyst() {
       // explicitly and disclosed in the form before uploaded files are sent.
       const formData = new FormData()
       formData.append('question', q)
+      if (previousTurn) formData.append('previous_question', previousTurn.question)
       formData.append('use_llm', String(useLlm))
       formData.append('use_cloud', String(reviews.length ? false : useCloud))
       if (reviews.length) formData.append('reviewed_tables', JSON.stringify(reviews))
@@ -313,7 +336,7 @@ export function AIBusinessAnalyst() {
     } finally {
       requestControllersRef.current.delete(turnId)
     }
-  }, [useLlm, useCloud, agenticStatus])
+  }, [useLlm, useCloud, agenticStatus, turns])
 
   const ask = useCallback(async () => {
     const q = question.trim()
@@ -464,7 +487,7 @@ export function AIBusinessAnalyst() {
           {t('Excel includes all non-empty sheets. Scanned PDFs use offline Arabic + English OCR on this server—no paid API. Uncertain figures must be verified against a corrected source before calculations.', 'يشمل Excel كل الأوراق غير الفارغة. تُحلَّل ملفات PDF الممسوحة ضوئياً محلياً وبلا إنترنت باستخدام OCR للعربية والإنجليزية، من دون واجهة مدفوعة. يجب التحقق من الأرقام غير المؤكدة بمصدر مُصحح قبل إجراء الحسابات.')}
         </p>
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          {t('Ask naturally in Arabic or English and use column names or exact category values from your file. Examples work without a language model. For exact numeric/date filters or two-cohort comparisons, use the explicit syntax below; dates must be YYYY-MM-DD. When multiple files or sheets are attached, identify the source by name.', 'اسأل بصياغة طبيعية بالعربية أو الإنجليزية، واستخدم أسماء الأعمدة أو قيم الفئات الموجودة في الملف. تعمل الأمثلة من دون نموذج لغوي. للتصفية الرقمية أو الزمنية الدقيقة أو مقارنة مجموعتين، استخدم الصيغة الصريحة أدناه؛ ويجب أن تكون التواريخ بصيغة YYYY-MM-DD. عند إرفاق عدة ملفات أو أوراق، حدّد المصدر باسمه.')}
+          {t('Ask naturally in Arabic or English and use column names or exact category values from your file. On the local path, short follow-ups such as “And by department?” reuse the last successful query only while the same files remain selected. Explicit cloud mode sends only the current question. Separate complete questions with a semicolon or “and also/وكذلك”; each runs independently, and an unclear part stops the combined answer. For exact numeric/date filters or two-cohort comparisons, use the syntax below; dates must be YYYY-MM-DD. When multiple files or sheets are attached, identify the source by name.', 'اسأل بصياغة طبيعية بالعربية أو الإنجليزية، واستخدم أسماء الأعمدة أو قيم الفئات الموجودة في الملف. في المعالجة المحلية، تستخدم الأسئلة التكميلية القصيرة مثل «وماذا عن القسم؟» آخر استفسار ناجح فقط ما دامت الملفات نفسها محددة. عند اختيار المعالجة السحابية، يُرسل السؤال الحالي فقط. افصل الأسئلة المكتملة بفاصلة منقوطة أو «وكذلك»؛ يُحسب كل سؤال على حدة، وأي جزء غير واضح يوقف الإجابة المجمعة. للتصفية الرقمية أو الزمنية الدقيقة أو مقارنة مجموعتين، استخدم الصيغة أدناه؛ ويجب أن تكون التواريخ بصيغة YYYY-MM-DD. عند إرفاق عدة ملفات أو أوراق، حدّد المصدر باسمه.')}
           <code dir="ltr" className="block text-xs mt-2 whitespace-pre-wrap">{'How many contracts are Expired?  ·  كم عقد منتهي؟\nTotal Net Sales by Department\nTotal "Net Sales" where "Department" = "Retail" and "Date" >= "2025-01-01"\ncompare total "Net Sales" where "Department" = "Retail" versus "Department" = "Online"'}</code>
         </p>
         <div className="flex flex-wrap gap-4 text-xs text-slate-500 dark:text-slate-400">
@@ -656,7 +679,7 @@ function AnswerCard({ response, t, isAr }: { response: AskResponse; t: (en: stri
       {a.query_audit && (
         <section className="rounded-lg bg-slate-50 dark:bg-slate-800 p-3 space-y-2 text-xs" aria-label={t('Applied filters', 'التصفية المطبقة')}>
           <h4 className="font-semibold">{t('Applied filters', 'التصفية المطبقة')}</h4>
-          <p>{t('Source', 'المصدر')}: {a.query_audit.source_file} · {a.query_audit.measure ?? t('Record count', 'عدد السجلات')}{a.query_audit.currency ? ` · ${t('Source currency context', 'عملة المصدر')}: ${a.query_audit.currency}` : ''}</p>
+          <p>{t('Source', 'المصدر')}: {a.query_audit.operation === 'multi_intent' ? t('Multiple local questions', 'استفسارات محلية متعددة') : a.query_audit.source_file} · {a.query_audit.operation === 'multi_intent' ? t('Independent results', 'نتائج مستقلة') : a.query_audit.measure ?? t('Record count', 'عدد السجلات')}{a.query_audit.currency ? ` · ${t('Source currency context', 'عملة المصدر')}: ${a.query_audit.currency}` : ''}</p>
           {a.query_audit.cohorts.map((cohort, i) => (
             <div key={i} className="space-y-1">
               <p className="font-medium">{a.query_audit!.cohorts.length > 1 ? `${t('Cohort', 'المجموعة')} ${i + 1}` : t('Selected rows', 'الصفوف المختارة')}</p>
@@ -667,7 +690,20 @@ function AnswerCard({ response, t, isAr }: { response: AskResponse; t: (en: stri
               <p className="text-slate-500 dark:text-slate-400">{t('Missing filter values (source rows)', 'قيم تصفية مفقودة (صفوف المصدر)')}: {cohort.missing_filter_rows} · {t('Missing measure values (matched rows)', 'قيم المقياس المفقودة (الصفوف المطابقة)')}: {cohort.missing_measure_rows}</p>
             </div>
           ))}
-          <p className="text-slate-500 dark:text-slate-400">{t('All filters within a cohort must match. Missing filter values are excluded, even for !=. Cohorts may overlap; their counts must not be added. No currency conversion is performed.', 'يجب تطابق جميع الشروط داخل المجموعة. تُستبعد قيم التصفية المفقودة حتى مع !=. قد تتداخل المجموعات؛ لا تجمع أعدادها. لا يتم تحويل العملات.')}</p>
+          {a.query_audit.subqueries?.map((subquery, index) => (
+            <div key={index} className="rounded-md border border-slate-200 dark:border-slate-700 p-2 space-y-1">
+              <p><bdi>{index + 1}. {subquery.question}</bdi> · {subquery.source_file} · {t('Rows', 'الصفوف')}: {subquery.rows}{subquery.measure ? ` · ${subquery.measure}` : ''}</p>
+              {subquery.cohorts.map((cohort, cohortIndex) => (
+                <p key={cohortIndex} className="text-slate-500 dark:text-slate-400">
+                  {cohort.filters.map((filter) => `${filter.column} ${filter.operator} ${String(filter.value)}`).join(' · ') || t('No explicit filters', 'لا توجد عوامل تصفية صريحة')}
+                  {' — '}{t('Included', 'المشمولة')}: {cohort.included_rows}/{cohort.source_rows}
+                </p>
+              ))}
+            </div>
+          ))}
+          {a.query_audit.cohorts.length > 0 && (
+            <p className="text-slate-500 dark:text-slate-400">{t('All filters within a cohort must match. Missing filter values are excluded, even for !=. Cohorts may overlap; their counts must not be added. No currency conversion is performed.', 'يجب تطابق جميع الشروط داخل المجموعة. تُستبعد قيم التصفية المفقودة حتى مع !=. قد تتداخل المجموعات؛ لا تجمع أعدادها. لا يتم تحويل العملات.')}</p>
+          )}
         </section>
       )}
 

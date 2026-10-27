@@ -73,7 +73,7 @@ from backend.core.dataset_type_classifier import (
     MARKET_INTELLIGENCE_ALLOWED,
 )
 from backend.core.excel_ingestion_engine import ExcelIngestionEngine
-from backend.core.local_question_engine import analyze_local_question
+from backend.core.local_question_engine import analyze_local_question, resolve_local_follow_up
 from backend.core.verified_table_review import reviewed_tables_from_json
 from backend.core.overtime_cost_intelligence_engine import (
     analyze_overtime_cost_intelligence,
@@ -3541,6 +3541,7 @@ def create_local_analysis_router() -> Any:
         use_cloud: bool = Form(False),
         progress_id: str = Form(""),
         reviewed_tables: str = Form(""),
+        previous_question: str = Form(""),
         current_user: LocalUser = Depends(get_current_user),
     ):
         """
@@ -3550,6 +3551,13 @@ def create_local_analysis_router() -> Any:
         (uploaded_file_bytes), needed by the merge_excel_files and edit_file
         tools, which the plain Q&A route never needed.
         """
+        if len(previous_question) > 500:
+            return JSONResponse({"detail": "Previous question context exceeds the 500-character limit."}, status_code=422)
+        local_question = (
+            resolve_local_follow_up(question, previous_question)
+            if previous_question and not use_cloud and not reviewed_tables else question.strip()
+        )
+        context_applied = local_question != question.strip()
         uploaded_frames: dict[str, pd.DataFrame] = {}
         pii_by_frame: dict[str, set[str]] = {}
         if progress_id:
@@ -3709,13 +3717,17 @@ def create_local_analysis_router() -> Any:
         # ── Local fallback: the EXACT existing Phase 37 path, unmodified ──
         try:
             local_answer = await asyncio.to_thread(
-                _ai_analyst_answer_question, question, domain_results, use_llm, uploaded_frames, pii_by_frame,
+                _ai_analyst_answer_question, local_question, domain_results, use_llm, uploaded_frames, pii_by_frame,
             )
         except Exception as exc:
             logger.exception("Phase 44: local fallback answer_question failed")
             _update_ocr_progress(progress_id, stage="failed")
             return JSONResponse(status_code=500, content={"detail": f"Both cloud and local answering failed: {exc}"})
 
+        if context_applied:
+            local_answer.limitations.append(
+                f"Follow-up interpreted locally with the previous question: {local_question}"
+            )
         if accepted_reviews:
             local_answer.limitations.append("This answer covers only the explicitly user-reviewed rows, not the full original PDF. Original OCR figures remain unverified.")
         _update_ocr_progress(progress_id, stage="complete")
@@ -3742,6 +3754,7 @@ def create_local_analysis_router() -> Any:
         use_llm: bool = Form(False),
         use_cloud: bool = Form(False),
         reviewed_tables: str = Form(""),
+        previous_question: str = Form(""),
         current_user: LocalUser = Depends(get_current_user),
     ):
         """Request-bound events work across workers without a polling registry.
@@ -3780,7 +3793,8 @@ def create_local_analysis_router() -> Any:
                 emit({"stage": "parsing"})
                 result = await local_ai_business_analyst_agentic(
                     question=question, files=buffered, use_llm=use_llm, use_cloud=use_cloud,
-                    progress_id="", reviewed_tables=reviewed_tables, current_user=current_user,
+                    progress_id="", reviewed_tables=reviewed_tables,
+                    previous_question=previous_question, current_user=current_user,
                 )
                 payload = json.loads(result.body)
                 await queue.put({

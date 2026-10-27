@@ -101,6 +101,26 @@ class UploadedContractApiTests(unittest.TestCase):
                 self.assertNotIn('"detail":"Not Found"', response.text)
                 self.assertIn("contract_expired_count", response.text)
 
+    def test_local_follow_up_context_is_supported_on_json_and_stream_routes(self):
+        csv = b"Department,Payroll\nOperations,10\nFinance,20\nOperations,30\n"
+        data = {
+            "question": "What about Finance?",
+            "previous_question": "Total Payroll by Department",
+        }
+        with patch(
+            "backend.api.local_analysis_routes._agentic_check_cloud_mode",
+            side_effect=AssertionError("Follow-up analysis must stay local"),
+        ), TestClient(self.app) as client:
+            for suffix in ("", "/stream"):
+                response = client.post(
+                    "/api/local/ai-business-analyst/agentic" + suffix,
+                    data=data,
+                    files={"files": ("payroll.csv", csv, "text/csv")},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertIn("Finance: 20.00", response.text)
+                self.assertIn("previous question", response.text)
+
     def test_excel_json_and_searchable_pdf_routes(self):
         from openpyxl import Workbook
         workbook = Workbook()
