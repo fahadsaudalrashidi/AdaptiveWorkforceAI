@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Play, ChevronRight, ChevronLeft, CheckCircle2,
-  Upload, ShieldCheck, BarChart3, Users, Brain,
+  ShieldCheck, BarChart3, Users, Brain,
   Activity, FileText, Download, Sparkles,
   WifiOff,
 } from 'lucide-react'
@@ -42,18 +42,16 @@ function StepLanding({ onNext }: { onNext: () => void; selectedCompany?: DemoCom
         </h2>
         <p className={`text-sm text-slate-500 dark:text-slate-400 max-w-lg mx-auto leading-relaxed ${isAr ? 'text-right' : ''}`}>
           {t(
-            'This guided demonstration walks through the complete upload-to-report workflow ' +
-            'using synthetic Saudi enterprise data. No real employee data is used.',
-            'يستعرض هذا العرض التوجيهي سير العمل الكامل من التحميل إلى التقرير ' +
-            'باستخدام بيانات مؤسسية سعودية اصطناعية. لا تُستخدم بيانات موظفين حقيقية.'
+            'Explore a guided preview of the analytics-to-report workflow using fictional Saudi enterprise examples. All figures are static and synthetic.',
+            'استكشف معاينة توجيهية لسير التحليلات والتقارير باستخدام أمثلة مؤسسية سعودية افتراضية. جميع الأرقام ثابتة واصطناعية.'
           )}
         </p>
       </div>
       <div className="grid grid-cols-3 gap-4 max-w-md mx-auto">
         {[
           { icon: ShieldCheck, label: t('Governance-First', 'الحوكمة أولاً'), color: 'text-emerald-500' },
-          { icon: WifiOff, label: t('Fully Offline', 'دون اتصال'), color: 'text-violet-500' },
-          { icon: Activity, label: t('AI-Powered', 'مدعوم بالذكاء الاصطناعي'), color: 'text-blue-500' },
+          { icon: WifiOff, label: t('Client-side preview', 'معاينة داخل المتصفح'), color: 'text-violet-500' },
+          { icon: Activity, label: t('Illustrative insights', 'رؤى توضيحية'), color: 'text-blue-500' },
         ].map(({ icon: Icon, label, color }) => (
           <div key={label} className="card p-4 text-center">
             <Icon size={22} className={`${color} mx-auto mb-2`} />
@@ -90,11 +88,11 @@ function StepUpload({
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
       <div className="flex items-center gap-3 p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-800/30 rounded-xl">
-        <Upload size={18} className="text-blue-500 flex-shrink-0" />
+          <Users size={18} className="text-blue-500 flex-shrink-0" />
         <p className={`text-sm text-blue-700 dark:text-blue-300 ${isAr ? 'text-right' : ''}`}>
           {t(
-            'Select a synthetic Saudi enterprise dataset to begin the demonstration.',
-            'اختر مجموعة بيانات مؤسسية سعودية اصطناعية لبدء العرض التوضيحي.'
+              'Choose a fictional company profile to preview sample workforce analytics. No file is uploaded.',
+              'اختر ملف شركة افتراضي لمعاينة تحليلات القوى العاملة. لا يتم رفع أي ملف.'
           )}
         </p>
       </div>
@@ -153,6 +151,12 @@ function StepGovernance({ onNext }: { onNext: () => void; selectedCompany?: Demo
   ]
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+      <div role="note" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+        {t(
+          'Illustrative example only. These governance results are fixed sample content; no scan is performed.',
+          'مثال توضيحي فقط. نتائج الحوكمة ثابتة ضمن العرض، ولا يتم إجراء فحص فعلي.'
+        )}
+      </div>
       <div className="card p-5 space-y-3">
         {checks.map((check, i) => (
           <motion.div
@@ -170,10 +174,10 @@ function StepGovernance({ onNext }: { onNext: () => void; selectedCompany?: Demo
           </motion.div>
         ))}
       </div>
-      <div className="p-4 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800/40 rounded-xl text-center">
-        <CheckCircle2 size={28} className="text-emerald-500 mx-auto mb-2" />
-        <p className="text-sm font-bold text-emerald-700 dark:text-emerald-400">
-          {t('All governance checks passed — READY', 'اجتازت جميع فحوصات الحوكمة — جاهز')}
+      <div className="p-4 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-center">
+        <ShieldCheck size={28} className="text-slate-500 mx-auto mb-2" />
+        <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
+          {t('Illustrative sample status — not a live scan', 'حالة توضيحية — ليست نتيجة فحص فعلي')}
         </p>
       </div>
       <button onClick={onNext} className="btn-primary flex items-center gap-2">
@@ -590,15 +594,15 @@ const DEMO_STEPS: DemoStep[] = [
     component: StepLanding,
   },
   {
-    id: 1, icon: Upload,
-    titleEn: 'Upload Dataset',   titleAr: 'تحميل البيانات',
-    descEn: 'Select enterprise', descAr: 'اختيار المؤسسة',
+    id: 1, icon: Users,
+    titleEn: 'Choose Demo Company', titleAr: 'اختيار شركة تجريبية',
+    descEn: 'Synthetic profile',   descAr: 'ملف اصطناعي',
     component: StepUpload,
   },
   {
     id: 2, icon: ShieldCheck,
     titleEn: 'Governance Scan',  titleAr: 'فحص الحوكمة',
-    descEn: 'PII & leakage',     descAr: 'PII والتسريب',
+    descEn: 'Sample checks',     descAr: 'فحوصات توضيحية',
     component: StepGovernance,
   },
   {
@@ -689,8 +693,8 @@ export function DemoMode() {
         </div>
         <p className={`text-sm text-slate-500 dark:text-slate-400 ${isAr ? 'text-right' : ''}`}>
           {t(
-            'Guided 10-step workflow — synthetic Saudi enterprise data only',
-            'سير عمل موجّه من 10 خطوات — بيانات مؤسسية سعودية اصطناعية فقط'
+            'Guided preview — synthetic Saudi enterprise data only',
+            'معاينة توجيهية — بيانات مؤسسية سعودية اصطناعية فقط'
           )}
         </p>
       </motion.div>

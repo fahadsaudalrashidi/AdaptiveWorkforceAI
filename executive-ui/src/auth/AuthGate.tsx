@@ -188,6 +188,11 @@ export function AuthGate({ children }: AuthGateProps) {
             {busy ? t('Signing in…', 'جارٍ تسجيل الدخول…') : t('Sign in', 'تسجيل الدخول')}
           </button>
         </form>
+        <div className="mt-5 border-t border-slate-200 pt-4 text-center dark:border-slate-700">
+          <a href="/demo" className="text-sm font-medium text-blue-700 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200">
+            {t('Explore the public synthetic-data demo', 'استكشف العرض العام بالبيانات الاصطناعية')}
+          </a>
+        </div>
       </AuthPanel>
     )
   }

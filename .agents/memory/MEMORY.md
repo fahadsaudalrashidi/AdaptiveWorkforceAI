@@ -6,3 +6,4 @@
 - [Local extraction delivery](local-extraction-delivery.md) — live progress stays request-bound; durable/resumable jobs require an explicit shared-state design.
 - [Vite cache after production builds](vite-cache-after-production-build.md) — restart the frontend after dependency-installing production builds to clear stale optimize-dep 504s.
 - [Frontend quality checks](frontend-quality-checks.md) — keep React hook linting active and fix ordering/dependency issues rather than suppressing them.
+- [Public demo safety](public-demo-safety.md) — keep public THRIVE demos synthetic-only and preserve authentication for real data and analysis.
