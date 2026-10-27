@@ -1,0 +1,30 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "cTPVXpIYXMZ7O0fDdTSRz"
+uri = "file://.local/outputs/thrive-strategic-analysis-2026.pdf"
+type = "pdf"
+title = "THRIVE Executive SWOT & Market Position (PDF)"
+description = "Seven-page executive strategy report with current market context, SWOT, competitor comparison, conceptual positioning map, recommendations, roadmap and source citations."
+logical_id = "b06a4c07-1578-42c5-9e2a-9dab1159dddb"
+content_hash = "sha256:fb26b46c19ce9b858d9a5461114b447c1ba3f81722ed42d36be3d5939a39fb1a"
+size = 55649
+mtime_ms = 1793059067316
+storage_uri = "gcs://replit-rams-assets-pike/rams/assets/repl:a30c924c-72e5-4583-839d-eb7c15d6e748/b06a4c07-1578-42c5-9e2a-9dab1159dddb/f376d350-4fe7-4125-9bdf-72f3e7db2028"
+storage_version_token = "1793059496573792"
+content_type = "application/pdf"
+
+[[outputs]]
+id = "JX6vpNAHXoXJJkfh9Ztsb"
+uri = "file://.local/outputs/thrive-strategic-analysis-2026.html"
+type = "html"
+title = "THRIVE Strategy Report — Web Preview"
+description = "Responsive bilingual companion report with a qualitative positioning map, competitor matrix, SWOT, action plan and linked sources."
+logical_id = "80f3b85d-eb72-4f07-9833-5b3ccdf6e5d2"
+content_hash = "sha256:e37fb0929abeb241f539f3758fe1df16c2470e72cc2bbd5c1fe7162491839d60"
+size = 33140
+mtime_ms = 1793058955480
+storage_uri = "gcs://replit-rams-assets-pike/rams/assets/repl:a30c924c-72e5-4583-839d-eb7c15d6e748/80f3b85d-eb72-4f07-9833-5b3ccdf6e5d2/e5525507-8806-4f0b-8c6b-a0b60075b7e2"
+storage_version_token = "1793059498011250"
+content_type = "text/html"

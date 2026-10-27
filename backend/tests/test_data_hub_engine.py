@@ -86,6 +86,28 @@ class DataHubProfileTests(unittest.TestCase):
         self.assertEqual(spikes[0]["periods"], ["2025-12"])
         self.assertEqual(spikes[0]["count"], 1)
         self.assertIn("MAD", spikes[0]["method"])
+        self.assertEqual(spikes[0]["seasonal_pattern_periods"], [])
+        self.assertIn("not confirmed", spikes[0]["seasonality_context"])
+
+    def test_seasonal_context_is_additive_and_requires_three_annual_cycles(self):
+        values = [100] * 36
+        values[11] = 220
+        values[23] = 230
+        values[35] = 240
+        frame = pd.DataFrame({
+            "Month": pd.date_range("2024-01-01", periods=36, freq="MS"),
+            "Operating Cost": values,
+        })
+        profile = profile_frame(frame, filename="seasonal-costs.csv", sheet="Data")
+        spikes = [
+            anomaly for anomaly in profile["anomalies"]
+            if anomaly["kind"] == "temporal_cost_spike"
+        ]
+        self.assertEqual(len(spikes), 1)
+        self.assertEqual(spikes[0]["count"], 3)
+        self.assertEqual(spikes[0]["periods"], ["2024-12", "2025-12", "2026-12"])
+        self.assertEqual(spikes[0]["seasonal_pattern_periods"], ["2026-12"])
+        self.assertEqual(spikes[0]["severity"], "moderate")
 
     def test_monthly_forecast_has_observed_and_intervals(self):
         frame = pd.DataFrame({

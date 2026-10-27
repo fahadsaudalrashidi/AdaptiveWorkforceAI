@@ -48,25 +48,31 @@ _RECORD_TERMS = {
 _SEMANTIC_ALIASES = {
     "payroll": (
         "payroll", "salary", "salaries", "wage", "wages", "compensation",
-        "إجمالي الرواتب", "الرواتب", "راتب", "أجور",
+        "إجمالي الرواتب", "الرواتب", "رواتب", "راتب", "أجور", "أجور الموظفين",
+        "المرتبات", "الرواتب الشهرية", "تكلفة الرواتب", "تكاليف الرواتب",
+        "تعويضات الموظفين",
     ),
     "expense": (
         "expense", "expenses", "cost", "costs", "spend", "spending",
-        "expenditure", "مصروف", "مصروفات", "مصاريف", "تكلفة", "تكاليف",
+        "expenditure", "مصروف", "مصروفات", "المصروفات", "مصاريف", "النفقات",
+        "تكلفة", "تكاليف", "تكاليف التشغيل", "مصاريف التشغيل", "الإنفاق",
         "إنفاق",
     ),
-    "profit": ("profit", "profits", "ربح", "أرباح", "الربح"),
+    "profit": ("profit", "profits", "ربح", "أرباح", "الأرباح", "الربح", "الربحية"),
     "net_profit": (
         "net profit", "net income", "صافي الربح", "الربح الصافي", "صافي الدخل",
+        "صافي الأرباح", "الربح بعد الضريبة",
     ),
     "revenue": (
         "revenue", "sales", "turnover", "income", "مبيعات", "إيراد",
-        "إيرادات", "دخل", "عائد",
+        "المبيعات", "إيرادات", "الإيرادات", "دخل", "عائد", "الدخل الإجمالي",
+        "إجمالي الدخل",
     ),
     "amount": ("amount", "value", "مبلغ", "مبالغ", "قيمة", "قيم"),
     "department": (
         "department", "dept", "division", "business unit", "team",
-        "قسم", "أقسام", "إدارة", "إدارات", "قطاع",
+        "قسم", "قسم الموظفين", "أقسام", "إدارة", "إدارات", "الادارة",
+        "الوحدة التنظيمية", "قطاع",
     ),
     "category": (
         "category", "classification", "class", "type", "فئة", "فئات",
@@ -74,7 +80,8 @@ _SEMANTIC_ALIASES = {
     ),
     "headcount": (
         "headcount", "employee count", "staff count", "employees", "employee",
-        "staff", "عدد الموظفين", "موظف", "موظفين", "عاملين",
+        "staff", "عدد الموظفين", "أعداد الموظفين", "إجمالي الموظفين",
+        "عدد العاملين", "القوى العاملة", "موظف", "موظفين", "عاملين",
     ),
 }
 _FINANCIAL_MEASURE_CONCEPTS = {"payroll", "expense", "profit", "net_profit", "revenue"}
@@ -135,11 +142,17 @@ def _safe_column(name: Any) -> bool:
 
 def _semantic_concepts(text: str) -> set[str]:
     tokens = _tokens(text)
-    return {
+    concepts = {
         concept
         for concept, aliases in _SEMANTIC_ALIASES.items()
         if any(_tokens(alias) <= tokens for alias in aliases)
     }
+    if "net_profit" in concepts:
+        # A specific net-income phrase should not also score as generic profit
+        # or revenue merely because those words are contained in its aliases.
+        concepts.discard("profit")
+        concepts.discard("revenue")
+    return concepts
 
 
 def _numeric_series(series: pd.Series) -> pd.Series | None:
@@ -590,7 +603,13 @@ def analyze_local_question(
             ),
             "", "clarify", filename, len(frame), safe_columns, [], priority=True,
         )
-    explicit_filter_request = bool(re.search(r"\b(where|only|for|in|with)\b|فقط|في|لدى", q, re.I))
+    explicit_filter_request = bool(
+        re.search(r"\b(where|only|for|in|with)\b", q, re.I)
+        or re.search(
+            r"(?<![\u0600-\u06ff])(?:فقط|في|لدى)(?![\u0600-\u06ff])",
+            q,
+        )
+    )
     grouping_request = bool(re.search(r"\b(by|per|each|group|grouped)\b|حسب|لكل|كل", q, re.I))
     source_clause = re.search(r"\b(?:in|from)\s+([^\s,?.]+)", q, re.I)
     source_selected = bool(

@@ -261,6 +261,16 @@ class LocalFileAnalyticsTests(unittest.TestCase):
         self.assertIn("350.00", arabic.detail)
         self.assertIn("350.00", english.detail)
 
+    def test_arabic_net_profit_phrase_prefers_specific_net_income_measure(self) -> None:
+        frame = pd.DataFrame({
+            "Net Income": [60.0, 40.0],
+            "Profit": [5.0, 7.0],
+        })
+        answer = analyze_local_question("إجمالي صافي الأرباح", {"finance.csv": frame})
+        self.assertEqual(answer.operation, "total")
+        self.assertIn("Net Income", answer.detail)
+        self.assertIn("100.00", answer.detail)
+
     def test_arabic_top_costs_groups_by_department(self) -> None:
         frame = pd.DataFrame({
             "Department": ["Operations", "Finance", "Operations", "Finance"],

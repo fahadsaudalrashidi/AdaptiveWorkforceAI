@@ -290,6 +290,7 @@ def _temporal_cost_checks(frame: pd.DataFrame, sensitive: set[str]) -> list[dict
             continue
 
         flagged_periods: list[str] = []
+        flagged_indices: list[int] = []
         window = 6
         for index in range(window, len(monthly)):
             history = monthly.iloc[index - window:index]
@@ -301,9 +302,29 @@ def _temporal_cost_checks(frame: pd.DataFrame, sensitive: set[str]) -> list[dict
             threshold = baseline + max(3 * robust_scale, abs(baseline) * 0.5, 1e-9)
             if float(monthly.iloc[index]) > threshold:
                 flagged_periods.append(str(monthly.index[index]))
+                flagged_indices.append(index)
         evaluated = len(monthly) - window
         if not flagged_periods:
             continue
+        # Preserve the existing detector's flags and score exactly. This
+        # sidecar only adds context when the same month was independently
+        # flagged in each of the prior two annual cycles.
+        flagged_index_set = set(flagged_indices)
+        recurring_periods: list[str] = []
+        for index in flagged_indices:
+            if index < 24:
+                continue
+            period, prior_year, two_years_prior = (
+                monthly.index[index], monthly.index[index - 12], monthly.index[index - 24]
+            )
+            if (
+                period.month == prior_year.month == two_years_prior.month
+                and period.year - prior_year.year == 1
+                and prior_year.year - two_years_prior.year == 1
+                and index - 12 in flagged_index_set
+                and index - 24 in flagged_index_set
+            ):
+                recurring_periods.append(str(period))
         rate = len(flagged_periods) * 100 / max(evaluated, 1)
         checks.append({
             "id": "temporal_cost_spike",
@@ -316,6 +337,17 @@ def _temporal_cost_checks(frame: pd.DataFrame, sensitive: set[str]) -> list[dict
             "method": "Monthly aggregate compared with the prior six-month median + robust MAD threshold (50% minimum rise)",
             "method_ar": "مقارنة الإجمالي الشهري بوسيط الأشهر الستة السابقة وحدّ MAD متين (ارتفاع أدنى 50%)",
             "periods": flagged_periods[:12],
+            "seasonal_pattern_periods": recurring_periods[:12],
+            "seasonality_context": (
+                "Same calendar month was also flagged in both prior annual cycles; check the payroll calendar before treating it as a new incident."
+                if recurring_periods else
+                "Seasonal recurrence is not confirmed; treat this as a screening signal, not a conclusion."
+            ),
+            "seasonality_context_ar": (
+                "رُصدت الإشارة أيضاً في الشهر نفسه خلال الدورتين السنويتين السابقتين؛ راجع تقويم الرواتب قبل اعتبارها حالة جديدة."
+                if recurring_periods else
+                "لم يتأكد التكرار الموسمي؛ تعامل مع هذه الإشارة كتنبيه للفحص لا كاستنتاج."
+            ),
         })
     return checks
 
@@ -830,9 +862,9 @@ def build_summary_xlsx(profiles: list[dict[str, Any]], language: str = "en") -> 
     )
     anomaly_sheet = workbook.create_sheet("إشارات المراجعة" if is_ar else "Anomalies")
     anomaly_sheet.append(
-        ["الملف", "الورقة", "الإشارة", "العمود", "المُعلّم", "المقيّم", "النسبة %", "الخطورة", "المنهجية", "الفترات"]
+        ["الملف", "الورقة", "الإشارة", "العمود", "المُعلّم", "المقيّم", "النسبة %", "الخطورة", "المنهجية", "الفترات", "سياق الموسمية"]
         if is_ar else
-        ["File", "Sheet", "Signal", "Column", "Flagged", "Evaluated", "Rate %", "Severity", "Method", "Periods"]
+        ["File", "Sheet", "Signal", "Column", "Flagged", "Evaluated", "Rate %", "Severity", "Method", "Periods", "Seasonality context"]
     )
     cleaning_sheet = workbook.create_sheet("سجل التنظيف" if is_ar else "Cleaning Log")
     cleaning_sheet.append(
@@ -861,6 +893,7 @@ def build_summary_xlsx(profiles: list[dict[str, Any]], language: str = "en") -> 
                 anomaly.get("percentage"), safe_text(anomaly["severity"]),
                 safe_text(anomaly.get("method_ar") if is_ar else anomaly["method"]),
                 safe_text(", ".join(anomaly.get("periods", []))),
+                safe_text(anomaly.get("seasonality_context_ar") if is_ar else anomaly.get("seasonality_context", "")),
             ])
         for item in profile["applied_cleaning"]:
             cleaning_sheet.append([
@@ -967,6 +1000,9 @@ def build_summary_pdf(profiles: list[dict[str, Any]], language: str = "en") -> b
                     f"الفترات: {periods}" if is_ar else f"Periods: {periods}",
                     size=8,
                 )
+            seasonal_context = anomaly.get("seasonality_context_ar") if is_ar else anomaly.get("seasonality_context")
+            if seasonal_context:
+                write(str(seasonal_context), size=8)
         if profile["anomalies"]:
             write("Column-level anomaly counts are review signals, not source records.", size=8)
         for column in profile["columns"][:100]:
