@@ -827,6 +827,246 @@ def workforce_scenario_frame(
     }
 
 
+def workforce_skills_frame(
+    supply_frame: pd.DataFrame,
+    *,
+    filename: str,
+    sheet: str,
+    supply_role_column: str,
+    supply_skill_column: str,
+    supply_count_column: str | None = None,
+    demand_frame: pd.DataFrame | None = None,
+    demand_filename: str | None = None,
+    demand_sheet: str | None = None,
+    demand_role_column: str | None = None,
+    demand_skill_column: str | None = None,
+    demand_count_column: str | None = None,
+) -> dict[str, Any]:
+    """Compare role/skill supply with explicit demand, returning safe aggregates only."""
+    if supply_frame.empty:
+        raise ValueError("The selected skills inventory has no data rows.")
+
+    def validate_columns(
+        frame: pd.DataFrame,
+        columns: list[str],
+        context: str,
+    ) -> None:
+        if len(set(map(str, frame.columns))) != len(frame.columns):
+            raise ValueError(f"Duplicate column names in the {context} must be resolved before skills analysis.")
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"Choose mapped role, skill, and count columns present in the {context}.")
+        scanner = SecureFileIngestion()
+        if any(_sensitivity(column, scanner)[0] for column in columns):
+            raise ValueError(f"Skills analysis is disabled for {context} columns identified as personal or post-event data.")
+
+    supply_columns = [supply_role_column, supply_skill_column]
+    if supply_count_column:
+        supply_columns.append(supply_count_column)
+    validate_columns(supply_frame, supply_columns, "skills inventory")
+    if supply_role_column == supply_skill_column:
+        raise ValueError("Choose separate role and skill columns in the skills inventory.")
+    if supply_count_column in {supply_role_column, supply_skill_column}:
+        raise ValueError("Choose a separate numeric count column in the skills inventory.")
+
+    demand_present = demand_frame is not None
+    if demand_present:
+        if demand_frame.empty:
+            raise ValueError("The selected role/skill demand table has no data rows.")
+        if not demand_role_column or not demand_skill_column or not demand_count_column:
+            raise ValueError("Map role, skill, and numeric demand columns explicitly.")
+        demand_columns = [demand_role_column, demand_skill_column, demand_count_column]
+        validate_columns(demand_frame, demand_columns, "role/skill demand table")
+        if len(set(demand_columns)) != len(demand_columns):
+            raise ValueError("Choose separate role, skill, and demand columns.")
+
+    def normalize_labels(frame: pd.DataFrame, role_col: str, skill_col: str) -> pd.DataFrame:
+        roles = frame[role_col].astype("string").str.strip()
+        skills = frame[skill_col].astype("string").str.strip()
+        valid = roles.notna() & roles.ne("") & skills.notna() & skills.ne("")
+        result = pd.DataFrame({
+            "role": roles[valid].astype(str).str.slice(0, _SAFE_LABEL_LIMIT),
+            "skill": skills[valid].astype(str).str.slice(0, _SAFE_LABEL_LIMIT),
+        })
+        result["role_key"] = result["role"].str.casefold()
+        result["skill_key"] = result["skill"].str.casefold()
+        return result
+
+    supply = normalize_labels(supply_frame, supply_role_column, supply_skill_column)
+    if supply.empty:
+        raise ValueError("No inventory rows contain both a role and a skill.")
+    supply["supply_records"] = 1.0
+    supply["supply"] = (
+        _clean_numeric(supply_frame.loc[supply.index, supply_count_column]).astype(float)
+        if supply_count_column
+        else 1.0
+    )
+    if supply["supply"].isna().any():
+        raise ValueError("The mapped supply count must contain a numeric value for every role/skill row.")
+    if (supply["supply"] < 0).any():
+        raise ValueError("Supply counts must be non-negative.")
+    supply_grouped = supply.groupby(["role_key", "skill_key"], sort=True).agg(
+        role=("role", "first"),
+        skill=("skill", "first"),
+        supply=("supply", "sum"),
+        supply_records=("supply_records", "sum"),
+    )
+    if len(supply_grouped) > 500:
+        raise ValueError("The selected skills inventory has too many role/skill groups to analyze safely.")
+
+    demand_grouped = pd.DataFrame(
+        columns=["demand_role", "demand_skill", "demand", "demand_records"],
+        index=pd.MultiIndex.from_arrays([[], []], names=["role_key", "skill_key"]),
+    )
+    if demand_present and demand_frame is not None and demand_role_column and demand_skill_column and demand_count_column:
+        demand = normalize_labels(demand_frame, demand_role_column, demand_skill_column)
+        demand["demand"] = _clean_numeric(demand_frame.loc[demand.index, demand_count_column]).astype(float)
+        if demand["demand"].isna().any():
+            raise ValueError("The mapped demand count must contain a numeric value for every role/skill row.")
+        if (demand["demand"] < 0).any():
+            raise ValueError("Demand counts must be non-negative.")
+        demand_grouped = demand.groupby(["role_key", "skill_key"], sort=True).agg(
+            demand_role=("role", "first"),
+            demand_skill=("skill", "first"),
+            demand=("demand", "sum"),
+            demand_records=("demand", "size"),
+        )
+        if len(demand_grouped) > 500:
+            raise ValueError("The selected demand table has too many role/skill groups to analyze safely.")
+
+    combined = supply_grouped.join(demand_grouped, how="outer")
+    combined["role"] = combined["role"].fillna(combined["demand_role"])
+    combined["skill"] = combined["skill"].fillna(combined["demand_skill"])
+    combined["supply"] = combined["supply"].fillna(0.0)
+    combined["supply_records"] = combined["supply_records"].fillna(0.0)
+    if demand_present:
+        combined["demand"] = combined["demand"].fillna(0.0)
+        combined["demand_records"] = combined["demand_records"].fillna(0.0)
+        combined["privacy_cohort"] = combined[["supply_records", "demand"]].min(axis=1)
+        combined["gap"] = (combined["demand"] - combined["supply"]).clip(lower=0)
+        combined["surplus"] = (combined["supply"] - combined["demand"]).clip(lower=0)
+    else:
+        combined["privacy_cohort"] = combined["supply_records"]
+        combined["demand"] = np.nan
+        combined["demand_records"] = 0.0
+        combined["gap"] = np.nan
+        combined["surplus"] = np.nan
+
+    if combined.empty or combined["supply"].sum() <= 0:
+        raise ValueError("A positive skills supply total is required for skills analysis.")
+    suppressed = bool((combined["privacy_cohort"] < 5).any())
+    enough_overall = float(combined["supply_records"].sum()) >= 5
+    enough_demand_overall = not demand_present or float(combined["demand"].sum()) >= 5
+    totals_suppressed = not enough_overall or not enough_demand_overall
+    can_show_totals = not totals_suppressed and not suppressed
+
+    skill_groups: list[dict[str, Any]] = []
+    if demand_present:
+        per_skill = combined.groupby("skill_key", sort=True)
+        for _, rows in per_skill:
+            if (rows["privacy_cohort"] < 5).any():
+                suppressed = True
+                continue
+            demand_total = float(rows["demand"].sum())
+            supply_total = float(rows["supply"].sum())
+            surplus_total = float(rows["surplus"].sum())
+            gap_total = float(rows["gap"].sum())
+            skill_groups.append({
+                "skill": str(rows["skill"].iloc[0])[:_SAFE_LABEL_LIMIT],
+                "supply": _finite(supply_total) or 0.0,
+                "demand": _finite(demand_total) or 0.0,
+                "coverage_pct": _finite(supply_total / demand_total * 100) if demand_total > 0 else None,
+                "gap": _finite(gap_total) or 0.0,
+                "redeployable_units": _finite(min(surplus_total, gap_total)) or 0.0,
+            })
+
+    detail_groups: list[dict[str, Any]] = []
+    if not suppressed and not totals_suppressed:
+        for _, row in combined.iterrows():
+            demand_value = _finite(row["demand"]) if demand_present else None
+            supply_value = _finite(row["supply"]) or 0.0
+            detail_groups.append({
+                "role": str(row["role"])[:_SAFE_LABEL_LIMIT],
+                "skill": str(row["skill"])[:_SAFE_LABEL_LIMIT],
+                "supply": supply_value,
+                "demand": demand_value,
+                "coverage_pct": (
+                    _finite(supply_value / demand_value * 100)
+                    if demand_value is not None and demand_value > 0
+                    else None
+                ),
+                "gap": _finite(row["gap"]) if demand_present else None,
+                "surplus": _finite(row["surplus"]) if demand_present else None,
+            })
+    else:
+        skill_groups = []
+
+    total_supply = float(combined["supply"].sum())
+    total_demand = float(combined["demand"].sum()) if demand_present else None
+    total_gap = float(combined["gap"].sum()) if demand_present else None
+    total_surplus = float(combined["surplus"].sum()) if demand_present else None
+    redeployable = (
+        float(sum(group["redeployable_units"] for group in skill_groups))
+        if demand_present and can_show_totals and not suppressed
+        else None
+    )
+    limitations = [
+        "Supply counts are summed from the explicitly mapped column, or counted as one per inventory row when row counting is selected.",
+        "Coverage is supply divided by explicitly supplied demand; no demand is inferred from inventory.",
+        "Possible redeployment is an aggregate upper bound: per-skill role surpluses are matched to role gaps. It does not recommend people or individual moves.",
+        "Role/skill records are treated as one skill per row; labels are matched case-insensitively after trimming.",
+    ]
+    if suppressed or totals_suppressed:
+        limitations.append(
+            "Role/skill breakdowns or totals were withheld because at least one evaluated cohort is below five; no person-level records are returned."
+        )
+    if not demand_present:
+        limitations.append("Demand data is unknown because no demand table was mapped; gaps and redeployment are not calculated.")
+
+    return {
+        "filename": Path(filename).name[:_SAFE_LABEL_LIMIT],
+        "sheet": str(sheet)[:_SAFE_LABEL_LIMIT],
+        "supply_mapping": {
+            "role_column": supply_role_column[:_SAFE_LABEL_LIMIT],
+            "skill_column": supply_skill_column[:_SAFE_LABEL_LIMIT],
+            "count_column": supply_count_column[:_SAFE_LABEL_LIMIT] if supply_count_column else None,
+            "count_basis": "mapped_column" if supply_count_column else "one_per_row",
+        },
+        "demand": {
+            "status": "known" if demand_present else "unknown",
+            "filename": Path(demand_filename).name[:_SAFE_LABEL_LIMIT] if demand_filename else None,
+            "sheet": str(demand_sheet)[:_SAFE_LABEL_LIMIT] if demand_sheet else None,
+            "mapping": ({
+                "role_column": demand_role_column[:_SAFE_LABEL_LIMIT] if demand_role_column else None,
+                "skill_column": demand_skill_column[:_SAFE_LABEL_LIMIT] if demand_skill_column else None,
+                "count_column": demand_count_column[:_SAFE_LABEL_LIMIT] if demand_count_column else None,
+            } if demand_present else None),
+        },
+        "totals": {
+            "supply": _finite(total_supply) if can_show_totals else None,
+            "demand": _finite(total_demand) if can_show_totals and demand_present else None,
+            "coverage_pct": (
+                _finite(total_supply / total_demand * 100)
+                if can_show_totals and demand_present and total_demand and total_demand > 0
+                else None
+            ),
+            "gap": _finite(total_gap) if can_show_totals and demand_present else None,
+            "surplus": _finite(total_surplus) if can_show_totals and demand_present else None,
+            "redeployable_units": _finite(redeployable) if redeployable is not None else None,
+        },
+        "groups": detail_groups,
+        "skill_groups": skill_groups,
+        "group_details_withheld": suppressed or totals_suppressed,
+        "limitations": limitations,
+        "privacy": {
+            "mode": "request_scoped_local_processing",
+            "persisted": False,
+            "source_rows_returned": False,
+            "person_level_recommendations": False,
+        },
+    }
+
+
 def build_summary_xlsx(profiles: list[dict[str, Any]], language: str = "en") -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill

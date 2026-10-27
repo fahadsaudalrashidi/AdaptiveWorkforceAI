@@ -54,6 +54,8 @@ class SemanticRole(str, Enum):
     FREE_TEXT       = "free_text"
     PROTECTED_ATTR  = "protected_attribute"
     BIOSIGNAL_RAW   = "biosignal_raw"
+    WORKFORCE_ROLE  = "workforce_role"
+    SKILL           = "skill"
     EMPLOYEE_ATTR   = "employee_attribute"
     SURVEY_ITEM     = "survey_item"
     FINANCIAL_METRIC= "financial_metric"
@@ -130,6 +132,10 @@ _COLUMN_ROLE_RULES: List[Tuple[str, SemanticRole, float]] = [
     (r"^row_num|^row_id",       SemanticRole.IDENTIFIER,     0.85),
     (r"^customer.*id",          SemanticRole.IDENTIFIER,     0.90),
     (r"^user.*id|^account.*id", SemanticRole.IDENTIFIER,     0.90),
+
+    # ── Workforce roles and skills ───────────────────────────────────────────
+    (r"^role$|job.?title|occupation|position.?title|^profession$", SemanticRole.WORKFORCE_ROLE, 0.92),
+    (r"skill|competenc|capabilit|proficiency", SemanticRole.SKILL, 0.95),
 
     # ── Temporal ──────────────────────────────────────────────────────────────
     (r"date|datetime|timestamp", SemanticRole.TEMPORAL,      0.90),

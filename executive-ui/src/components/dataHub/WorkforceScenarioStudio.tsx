@@ -79,6 +79,48 @@ interface ScenarioResponse {
   privacy: { persisted: false; source_rows_returned: false }
 }
 
+interface WorkforceSkillGroup {
+  role: string
+  skill: string
+  supply: number
+  demand: number | null
+  coverage_pct: number | null
+  gap: number | null
+  surplus: number | null
+}
+
+interface WorkforceSkillSummary {
+  skill: string
+  supply: number
+  demand: number
+  coverage_pct: number | null
+  gap: number
+  redeployable_units: number
+}
+
+interface WorkforceSkillsResponse {
+  filename: string
+  sheet: string
+  demand: { status: 'known' | 'unknown'; filename: string | null; sheet: string | null }
+  totals: {
+    supply: number | null
+    demand: number | null
+    coverage_pct: number | null
+    gap: number | null
+    surplus: number | null
+    redeployable_units: number | null
+  }
+  groups: WorkforceSkillGroup[]
+  skill_groups: WorkforceSkillSummary[]
+  group_details_withheld: boolean
+  limitations: string[]
+  privacy: {
+    persisted: false
+    source_rows_returned: false
+    person_level_recommendations: false
+  }
+}
+
 const MAX_SCENARIOS = 3
 
 function isNumericColumn(column: WorkforceScenarioColumn) {
@@ -139,6 +181,46 @@ function validateResponse(value: unknown): value is ScenarioResponse {
     && result.privacy.source_rows_returned === false
 }
 
+function nullableNumber(value: unknown) {
+  return value === null || finiteNumber(value)
+}
+
+function validateSkillsResponse(value: unknown): value is WorkforceSkillsResponse {
+  if (!value || typeof value !== 'object') return false
+  const result = value as WorkforceSkillsResponse
+  const totals = result.totals
+  return typeof result.filename === 'string'
+    && typeof result.sheet === 'string'
+    && !!result.demand
+    && (result.demand.status === 'known' || result.demand.status === 'unknown')
+    && !!totals
+    && nullableNumber(totals.supply)
+    && nullableNumber(totals.demand)
+    && nullableNumber(totals.coverage_pct)
+    && nullableNumber(totals.gap)
+    && nullableNumber(totals.surplus)
+    && nullableNumber(totals.redeployable_units)
+    && Array.isArray(result.groups)
+    && result.groups.every((group) =>
+      typeof group.role === 'string' && typeof group.skill === 'string'
+      && finiteNumber(group.supply) && nullableNumber(group.demand)
+      && nullableNumber(group.coverage_pct) && nullableNumber(group.gap)
+      && nullableNumber(group.surplus),
+    )
+    && Array.isArray(result.skill_groups)
+    && result.skill_groups.every((group) =>
+      typeof group.skill === 'string' && finiteNumber(group.supply)
+      && finiteNumber(group.demand) && nullableNumber(group.coverage_pct)
+      && finiteNumber(group.gap) && finiteNumber(group.redeployable_units),
+    )
+    && typeof result.group_details_withheld === 'boolean'
+    && Array.isArray(result.limitations)
+    && !!result.privacy
+    && result.privacy.persisted === false
+    && result.privacy.source_rows_returned === false
+    && result.privacy.person_level_recommendations === false
+}
+
 function makeScenario(id: string, index: number): ScenarioInput {
   return {
     id,
@@ -182,11 +264,46 @@ export function WorkforceScenarioStudio({
   const [result, setResult] = useState<ScenarioResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [skillsSupplyDatasetId, setSkillsSupplyDatasetId] = useState('')
+  const [skillsDemandDatasetId, setSkillsDemandDatasetId] = useState('')
+  const [skillsSupplyRoleColumn, setSkillsSupplyRoleColumn] = useState('')
+  const [skillsSupplySkillColumn, setSkillsSupplySkillColumn] = useState('')
+  const [skillsSupplyCountColumn, setSkillsSupplyCountColumn] = useState('__rows__')
+  const [skillsDemandRoleColumn, setSkillsDemandRoleColumn] = useState('')
+  const [skillsDemandSkillColumn, setSkillsDemandSkillColumn] = useState('')
+  const [skillsDemandCountColumn, setSkillsDemandCountColumn] = useState('')
+  const [skillsResult, setSkillsResult] = useState<WorkforceSkillsResponse | null>(null)
+  const [skillsLoading, setSkillsLoading] = useState(false)
+  const [skillsError, setSkillsError] = useState('')
+  const skillsSupplyDataset = availableDatasets.find((dataset) => dataset.id === skillsSupplyDatasetId) ?? selectedDataset
+  const skillsDemandDataset = availableDatasets.find((dataset) => dataset.id === skillsDemandDatasetId)
+  const skillsSupplyNumericColumns = skillsSupplyDataset?.columns.filter(isNumericColumn) ?? []
+  const skillsDemandNumericColumns = skillsDemandDataset?.columns.filter(isNumericColumn) ?? []
   const busyCallback = useRef(onBusyChange)
   busyCallback.current = onBusyChange
 
-  useEffect(() => { busyCallback.current(loading) }, [loading])
+  useEffect(() => { busyCallback.current(loading || skillsLoading) }, [loading, skillsLoading])
   useEffect(() => () => busyCallback.current(false), [])
+
+  useEffect(() => {
+    if (!availableDatasets.some((dataset) => dataset.id === skillsSupplyDatasetId)) {
+      setSkillsSupplyDatasetId(selectedDataset?.id ?? availableDatasets[0]?.id ?? '')
+    }
+  }, [availableDatasets, selectedDataset, skillsSupplyDatasetId])
+
+  useEffect(() => {
+    setSkillsSupplyRoleColumn('')
+    setSkillsSupplySkillColumn('')
+    setSkillsSupplyCountColumn('__rows__')
+    setSkillsResult(null)
+  }, [skillsSupplyDataset])
+
+  useEffect(() => {
+    setSkillsDemandRoleColumn('')
+    setSkillsDemandSkillColumn('')
+    setSkillsDemandCountColumn('')
+    setSkillsResult(null)
+  }, [skillsDemandDataset])
 
   useEffect(() => {
     if (!selectedDataset) {
@@ -209,6 +326,7 @@ export function WorkforceScenarioStudio({
   }, [selectedDataset])
 
   useEffect(() => { setResult(null) }, [cleaningOptions])
+  useEffect(() => { setSkillsResult(null) }, [cleaningOptions])
 
   const hasSchema = !!selectedDataset && numericColumns.length > 0
   const schemaIssue = !availableDatasets.length
@@ -236,6 +354,70 @@ export function WorkforceScenarioStudio({
     if (scenarios.length <= 1) return
     setScenarios((current) => current.filter((scenario) => scenario.id !== id))
     setResult(null)
+  }
+
+  const submitSkills = async () => {
+    if (disabled || skillsLoading || !skillsSupplyDataset) return
+    setSkillsError('')
+    setSkillsResult(null)
+    if (!skillsSupplyRoleColumn || !skillsSupplySkillColumn) {
+      setSkillsError(t('Map the inventory role and skill columns explicitly.', 'حدد عمودي الدور والمهارة في المخزون صراحةً.'))
+      return
+    }
+    if (skillsSupplyRoleColumn === skillsSupplySkillColumn
+      || (skillsSupplyCountColumn !== '__rows__' && [skillsSupplyRoleColumn, skillsSupplySkillColumn].includes(skillsSupplyCountColumn))) {
+      setSkillsError(t('Choose separate role, skill and supply columns.', 'اختر أعمدة منفصلة للدور والمهارة والعرض.'))
+      return
+    }
+    if (skillsDemandDataset && (!skillsDemandRoleColumn || !skillsDemandSkillColumn || !skillsDemandCountColumn)) {
+      setSkillsError(t('Map role, skill and demand columns explicitly, or choose no demand table.', 'حدد أعمدة الدور والمهارة والطلب صراحةً أو اختر عدم استخدام جدول للطلب.'))
+      return
+    }
+    if (skillsDemandDataset && new Set([skillsDemandRoleColumn, skillsDemandSkillColumn, skillsDemandCountColumn]).size < 3) {
+      setSkillsError(t('Choose separate role, skill and demand columns.', 'اختر أعمدة منفصلة للدور والمهارة والطلب.'))
+      return
+    }
+    const supplyFile = files.find((file) => file.name === skillsSupplyDataset.filename)
+    const demandFile = skillsDemandDataset
+      ? files.find((file) => file.name === skillsDemandDataset.filename)
+      : undefined
+    if (!supplyFile || (skillsDemandDataset && !demandFile)) {
+      setSkillsError(t('A selected source file is no longer available. Select it again before analysis.', 'لم يعد أحد ملفات المصدر المحددة متاحاً. أعد تحديده قبل التحليل.'))
+      return
+    }
+
+    setSkillsLoading(true)
+    try {
+      const form = new FormData()
+      form.append('file', supplyFile)
+      form.append('sheet', skillsSupplyDataset.sheet)
+      form.append('supply_role_column', skillsSupplyRoleColumn)
+      form.append('supply_skill_column', skillsSupplySkillColumn)
+      form.append('supply_count_column', skillsSupplyCountColumn === '__rows__' ? '' : skillsSupplyCountColumn)
+      if (skillsDemandDataset && demandFile) {
+        form.append('demand_file', demandFile)
+        form.append('demand_sheet', skillsDemandDataset.sheet)
+        form.append('demand_role_column', skillsDemandRoleColumn)
+        form.append('demand_skill_column', skillsDemandSkillColumn)
+        form.append('demand_count_column', skillsDemandCountColumn)
+      }
+      form.append('cleaning_options', JSON.stringify(cleaningOptions))
+      form.append('language', isAr ? 'ar' : 'en')
+      const response = await fetch('/api/local/data-hub/skills', { method: 'POST', body: form })
+      const payload: unknown = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(errorText(response, payload))
+      if (!validateSkillsResponse(payload)) {
+        throw new Error(t(
+          'The skills response did not confirm aggregate-only privacy. No results were displayed.',
+          'لم تؤكد استجابة المهارات خصوصية البيانات المجمعة فقط. لم تُعرض أي نتائج.',
+        ))
+      }
+      setSkillsResult(payload)
+    } catch (cause) {
+      setSkillsError(cause instanceof Error ? cause.message : t('Skills coverage could not be calculated. Please retry.', 'تعذر حساب تغطية المهارات. يرجى إعادة المحاولة.'))
+    } finally {
+      setSkillsLoading(false)
+    }
   }
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -609,6 +791,201 @@ export function WorkforceScenarioStudio({
             </div>
           )}
         </form>
+      )}
+
+      {availableDatasets.length > 0 && (
+        <section className={`${panel} space-y-4 p-4 sm:p-5`} aria-labelledby="skills-planning-title">
+          <div className="flex items-start gap-2">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#72c6a3]/10 text-xs font-bold text-[#9bdac0]">03</span>
+            <div>
+              <h3 id="skills-planning-title" className="text-sm font-semibold text-white">{t('Plan capacity by role and skill', 'خطط السعة حسب الدور والمهارة')}</h3>
+              <p className="mt-0.5 text-xs leading-5 text-slate-400">
+                {t('Map each column yourself. Use one role–skill record per row; demand remains unknown unless a demand table is selected.', 'حدد كل عمود بنفسك. استخدم سجلاً واحداً للدور والمهارة في كل صف؛ ويظل الطلب غير معروف ما لم يُحدد جدول للطلب.')}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div>
+              <label className={label} htmlFor="skills-supply-dataset">{t('Skills inventory', 'مخزون المهارات')}</label>
+              <select id="skills-supply-dataset" className={input} value={skillsSupplyDataset?.id ?? ''} onChange={(event) => { setSkillsSupplyDatasetId(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading}>
+                {availableDatasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.filename} · {dataset.sheet}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="skills-supply-role">{t('Inventory role column', 'عمود الدور في المخزون')}</label>
+              <select id="skills-supply-role" className={input} value={skillsSupplyRoleColumn} onChange={(event) => { setSkillsSupplyRoleColumn(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading || !skillsSupplyDataset}>
+                <option value="">{t('Select a role column', 'اختر عمود الدور')}</option>
+                {skillsSupplyDataset?.columns.filter((column) => !column.sensitive).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="skills-supply-skill">{t('Inventory skill column', 'عمود المهارة في المخزون')}</label>
+              <select id="skills-supply-skill" className={input} value={skillsSupplySkillColumn} onChange={(event) => { setSkillsSupplySkillColumn(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading || !skillsSupplyDataset}>
+                <option value="">{t('Select a skill column', 'اختر عمود المهارة')}</option>
+                {skillsSupplyDataset?.columns.filter((column) => !column.sensitive).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="skills-supply-count">{t('Supply count / capacity', 'عدد العرض / السعة')}</label>
+              <select id="skills-supply-count" className={input} value={skillsSupplyCountColumn} onChange={(event) => { setSkillsSupplyCountColumn(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading || !skillsSupplyDataset}>
+                <option value="__rows__">{t('Count each row as one', 'احتساب كل صف كواحد')}</option>
+                {skillsSupplyNumericColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="skills-demand-dataset">{t('Role/skill demand table', 'جدول الطلب حسب الدور والمهارة')}</label>
+              <select id="skills-demand-dataset" className={input} value={skillsDemandDatasetId} onChange={(event) => { setSkillsDemandDatasetId(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading}>
+                <option value="">{t('No demand table — unknown', 'لا يوجد جدول للطلب — غير معروف')}</option>
+                {availableDatasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.filename} · {dataset.sheet}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={label} htmlFor="skills-demand-count">{t('Demand count / capacity', 'عدد الطلب / السعة')}</label>
+              <select id="skills-demand-count" className={input} value={skillsDemandCountColumn} onChange={(event) => { setSkillsDemandCountColumn(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading || !skillsDemandDataset}>
+                <option value="">{t('Select a numeric demand column', 'اختر عمود الطلب الرقمي')}</option>
+                {skillsDemandNumericColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+              </select>
+            </div>
+            {skillsDemandDataset && (
+              <>
+                <div>
+                  <label className={label} htmlFor="skills-demand-role">{t('Demand role column', 'عمود الدور في الطلب')}</label>
+                  <select id="skills-demand-role" className={input} value={skillsDemandRoleColumn} onChange={(event) => { setSkillsDemandRoleColumn(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading}>
+                    <option value="">{t('Select a role column', 'اختر عمود الدور')}</option>
+                    {skillsDemandDataset.columns.filter((column) => !column.sensitive).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={label} htmlFor="skills-demand-skill">{t('Demand skill column', 'عمود المهارة في الطلب')}</label>
+                  <select id="skills-demand-skill" className={input} value={skillsDemandSkillColumn} onChange={(event) => { setSkillsDemandSkillColumn(event.target.value); setSkillsResult(null) }} disabled={disabled || skillsLoading}>
+                    <option value="">{t('Select a skill column', 'اختر عمود المهارة')}</option>
+                    {skillsDemandDataset.columns.filter((column) => !column.sensitive).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+                  </select>
+                </div>
+              </>
+            )}
+          </div>
+          <p className="flex items-start gap-1.5 text-[11px] leading-5 text-slate-500">
+            <CircleHelp size={13} className="mt-0.5 shrink-0" />
+            {t('Coverage compares mapped supply with mapped demand. Redeployment is a skill-level aggregate upper bound, not a recommendation about any person. Any group below five causes all role/skill details to be withheld.', 'تقارن التغطية العرض المحدد بالطلب المحدد. وإعادة التوزيع حد أعلى مجمع حسب المهارة، وليست توصية بشأن أي شخص. يؤدي وجود مجموعة دون خمسة أفراد إلى حجب جميع تفاصيل الأدوار والمهارات.')}
+          </p>
+
+          {skillsError && <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-400/25 bg-rose-950/25 px-4 py-3 text-sm text-rose-200"><AlertCircle size={17} className="mt-0.5 shrink-0" /><span>{skillsError}</span></div>}
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-[11px] leading-5 text-slate-500">{t('Files are processed locally for this request only. No source rows or person-level recommendations are returned or saved.', 'تُعالج الملفات محلياً لهذا الطلب فقط. ولا تُعاد أو تُحفظ سجلات المصدر أو توصيات على مستوى الأفراد.')}</p>
+            <button type="button" onClick={() => void submitSkills()} disabled={disabled || skillsLoading || !skillsSupplyDataset} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#72c6a3]/40 bg-[#72c6a3]/10 px-5 text-sm font-bold text-[#b4ebd4] transition hover:bg-[#72c6a3]/20 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto">
+              {skillsLoading ? <span className="h-4 w-4 animate-pulse rounded-full border-2 border-[#b4ebd4]/30 border-t-[#b4ebd4]" /> : <Scale size={16} />}
+              {skillsLoading ? t('Calculating skill coverage…', 'جارٍ حساب تغطية المهارات…') : t('Compare skills and demand', 'مقارنة المهارات والطلب')}
+            </button>
+          </div>
+
+          {skillsResult && !skillsLoading && (
+            <section className="overflow-hidden rounded-xl border border-[#3b4264]/80 bg-[#171a34]/65" aria-live="polite">
+              <div className="flex flex-col justify-between gap-2 border-b border-[#3b4264]/70 p-4 sm:flex-row sm:items-center">
+                <div>
+                  <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[.16em] text-[#9bdac0]"><Check size={13} />{t('SKILLS ANALYSIS READY', 'تحليل المهارات جاهز')}</div>
+                  <h4 className="mt-1 text-sm font-semibold text-white">{t('Aggregate capacity comparison', 'مقارنة السعة المجمعة')}</h4>
+                </div>
+                <span className="text-xs text-slate-400">{skillsResult.filename} <span className="text-slate-600">/</span> {skillsResult.sheet}</span>
+              </div>
+              {skillsResult.demand.status === 'unknown' && (
+                <p role="status" className="border-b border-amber-300/15 bg-amber-300/[.05] px-4 py-3 text-xs leading-5 text-amber-100">
+                  {t('Demand is unknown. No shortage, coverage rate or redeployment estimate is inferred without mapped demand data.', 'الطلب غير معروف. لا يتم استنتاج نقص أو نسبة تغطية أو تقدير لإعادة التوزيع دون بيانات طلب محددة.')}
+                </p>
+              )}
+              <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+                {([
+                  ['supply', t('Mapped supply', 'العرض المحدد')],
+                  ['demand', t('Mapped demand', 'الطلب المحدد')],
+                  ['coverage_pct', t('Coverage', 'التغطية')],
+                  ['redeployable_units', t('Possible redeployment', 'إمكانية إعادة التوزيع')],
+                ] as const).map(([field, title]) => (
+                  <div key={field} className="rounded-lg border border-[#3b4264]/70 bg-[#202447]/60 p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-[.12em] text-slate-500">{title}</div>
+                    <div className="mt-1 text-lg font-semibold tabular-nums text-slate-100">
+                      {field === 'coverage_pct' && skillsResult.totals[field] !== null
+                        ? `${formatNumber(skillsResult.totals[field])}%`
+                        : formatNumber(skillsResult.totals[field])}
+                    </div>
+                    {field === 'redeployable_units' && <div className="mt-1 text-[10px] text-slate-500">{t('Aggregate upper bound', 'حد أعلى مجمع')}</div>}
+                  </div>
+                ))}
+              </div>
+              {skillsResult.group_details_withheld && (
+                <p className="border-t border-[#3b4264]/60 px-4 py-3 text-xs leading-5 text-amber-100">
+                  {t('Role/skill details were withheld because a group has fewer than five records. The result does not disclose small-group breakdowns.', 'حُجبت تفاصيل الأدوار والمهارات لوجود مجموعة يقل عدد سجلاتها عن خمسة. لا تكشف النتائج تفاصيل المجموعات الصغيرة.')}
+                </p>
+              )}
+              {skillsResult.groups.length > 0 && (
+                <div className="border-t border-[#3b4264]/60 p-4">
+                  <h5 className="mb-2 text-xs font-semibold text-slate-200">{t('Role and skill coverage', 'التغطية حسب الدور والمهارة')}</h5>
+                  <div className="overflow-x-auto rounded-lg border border-[#3b4264]/70">
+                    <table className="w-full min-w-[660px] text-start text-xs">
+                      <thead className="bg-[#202447]/80 text-[10px] uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2.5">{t('Role', 'الدور')}</th>
+                          <th className="px-3 py-2.5">{t('Skill', 'المهارة')}</th>
+                          <th className="px-3 py-2.5">{t('Supply', 'العرض')}</th>
+                          <th className="px-3 py-2.5">{t('Demand', 'الطلب')}</th>
+                          <th className="px-3 py-2.5">{t('Coverage', 'التغطية')}</th>
+                          <th className="px-3 py-2.5">{t('Gap', 'الفجوة')}</th>
+                          <th className="px-3 py-2.5">{t('Surplus', 'الفائض')}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#3b4264]/50">
+                        {skillsResult.groups.map((group, index) => (
+                          <tr key={`${group.role}-${group.skill}-${index}`}>
+                            <td className="px-3 py-2.5 text-slate-300">{group.role}</td>
+                            <td className="px-3 py-2.5 text-slate-300">{group.skill}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.supply)}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.demand)}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{group.coverage_pct === null ? '—' : `${formatNumber(group.coverage_pct)}%`}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.gap)}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.surplus)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {skillsResult.skill_groups.length > 0 && (
+                <div className="border-t border-[#3b4264]/60 p-4">
+                  <h5 className="mb-2 text-xs font-semibold text-slate-200">{t('Possible redeployment by skill', 'إمكانية إعادة التوزيع حسب المهارة')}</h5>
+                  <div className="overflow-x-auto rounded-lg border border-[#3b4264]/70">
+                    <table className="w-full min-w-[500px] text-start text-xs">
+                      <thead className="bg-[#202447]/80 text-[10px] uppercase tracking-wider text-slate-500">
+                        <tr><th className="px-3 py-2.5">{t('Skill', 'المهارة')}</th><th className="px-3 py-2.5">{t('Supply', 'العرض')}</th><th className="px-3 py-2.5">{t('Demand', 'الطلب')}</th><th className="px-3 py-2.5">{t('Gap', 'الفجوة')}</th><th className="px-3 py-2.5">{t('Possible redeployment', 'إمكانية إعادة التوزيع')}</th></tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#3b4264]/50">
+                        {skillsResult.skill_groups.map((group) => (
+                          <tr key={group.skill}>
+                            <td className="px-3 py-2.5 text-slate-300">{group.skill}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.supply)}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.demand)}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.gap)}</td>
+                            <td className="px-3 py-2.5 tabular-nums text-slate-200">{formatNumber(group.redeployable_units)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {skillsResult.limitations.length > 0 && (
+                <div className="border-t border-[#3b4264]/60 px-4 py-3 text-[11px] leading-5 text-slate-500">
+                  <ul className="list-inside list-disc space-y-1">{skillsResult.limitations.map((limitation, index) => <li key={`${index}-${limitation}`}>{limitation}</li>)}</ul>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[#3b4264]/60 px-4 py-3 text-[10px] text-slate-500">
+                <span className="inline-flex items-center gap-1.5 text-[#9bdac0]"><LockKeyhole size={12} />{t('Not persisted', 'غير محفوظة')}</span>
+                <span>{t('Source rows not returned', 'لم تُعَد سجلات المصدر')}</span>
+                <span>{t('No person-level recommendations', 'لا توجد توصيات على مستوى الأفراد')}</span>
+              </div>
+            </section>
+          )}
+        </section>
       )}
     </section>
   )

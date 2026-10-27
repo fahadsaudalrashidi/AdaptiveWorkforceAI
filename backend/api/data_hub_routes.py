@@ -26,6 +26,7 @@ from backend.core.data_hub_engine import (
     forecast_frame,
     profile_upload,
     workforce_scenario_frame,
+    workforce_skills_frame,
 )
 from backend.core.excel_ingestion_engine import ExcelIngestionEngine
 from backend.core.security_middleware import require_permission
@@ -269,6 +270,111 @@ def create_data_hub_router() -> APIRouter:
         except Exception:
             logger.exception("Data Hub workforce scenario failed for %s", filename)
             raise HTTPException(status_code=422, detail="The selected data could not produce a valid scenario comparison.")
+
+    @router.post("/skills")
+    async def skills_data(
+        file: UploadFile = File(...),
+        sheet: str = Form(""),
+        supply_role_column: str = Form(...),
+        supply_skill_column: str = Form(...),
+        supply_count_column: str = Form(""),
+        demand_file: UploadFile | None = File(None),
+        demand_sheet: str = Form(""),
+        demand_role_column: str = Form(""),
+        demand_skill_column: str = Form(""),
+        demand_count_column: str = Form(""),
+        cleaning_options: str = Form("[]"),
+        language: str = Form("en"),
+    ) -> dict[str, Any]:
+        """Compare mapped workforce skill supply and demand; return aggregates only."""
+        filename = Path(file.filename or "inventory.dat").name
+        if Path(filename).suffix.lower() not in SUPPORTED_DATA_HUB_EXTENSIONS:
+            raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, JSON, or JSON Lines.")
+        raw = await file.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="Each file must be 25 MB or smaller.")
+        if not raw:
+            raise HTTPException(status_code=422, detail="The skills inventory file is empty.")
+
+        demand_filename: str | None = None
+        demand_raw: bytes | None = None
+        if demand_file and demand_file.filename:
+            demand_filename = Path(demand_file.filename).name
+            if Path(demand_filename).suffix.lower() not in SUPPORTED_DATA_HUB_EXTENSIONS:
+                raise HTTPException(status_code=415, detail="Use CSV, XLS, XLSX, JSON, or JSON Lines.")
+            demand_raw = await demand_file.read(MAX_FILE_BYTES + 1)
+            if len(demand_raw) > MAX_FILE_BYTES:
+                raise HTTPException(status_code=413, detail="Each file must be 25 MB or smaller.")
+            if not demand_raw:
+                raise HTTPException(status_code=422, detail="The role/skill demand file is empty.")
+            if len(raw) + len(demand_raw) > MAX_REQUEST_BYTES:
+                raise HTTPException(status_code=413, detail="The combined upload limit is 50 MB.")
+        if language not in {"en", "ar"}:
+            raise HTTPException(status_code=422, detail="language must be 'en' or 'ar'.")
+        options = parse_cleaning_options(cleaning_options)
+
+        def build() -> dict[str, Any]:
+            ingestion = ExcelIngestionEngine()
+
+            def select_frame(content: bytes, source_name: str, sheet_name: str):
+                results = ingestion.ingest_all(content, source_name)
+                selected = next(
+                    (
+                        result for name, result in results
+                        if result.success and result.df is not None and (not sheet_name or name == sheet_name)
+                    ),
+                    None,
+                )
+                if selected is None or selected.df is None:
+                    raise ValueError("A selected skills worksheet could not be found or read.")
+                cleaned, _, _ = apply_cleaning(selected.df, options)
+                return cleaned, selected.sheet_used or sheet_name or "Data"
+
+            supply_frame, actual_sheet = select_frame(raw, filename, sheet)
+            demand_frame = None
+            actual_demand_sheet = None
+            if demand_raw is not None and demand_filename:
+                demand_frame, actual_demand_sheet = select_frame(demand_raw, demand_filename, demand_sheet)
+            response = workforce_skills_frame(
+                supply_frame,
+                filename=filename,
+                sheet=actual_sheet,
+                supply_role_column=supply_role_column,
+                supply_skill_column=supply_skill_column,
+                supply_count_column=supply_count_column or None,
+                demand_frame=demand_frame,
+                demand_filename=demand_filename,
+                demand_sheet=actual_demand_sheet,
+                demand_role_column=demand_role_column or None,
+                demand_skill_column=demand_skill_column or None,
+                demand_count_column=demand_count_column or None,
+            )
+            if language == "ar":
+                response["limitations"] = [
+                    "تُجمع أعداد العرض من العمود المحدد صراحةً، أو تُحتسب كسجل واحد لكل صف عند اختيار احتساب الصفوف.",
+                    "التغطية هي العرض مقسوماً على الطلب المقدم صراحةً؛ ولا يُستنتج الطلب من بيانات المخزون.",
+                    "إمكانية إعادة التوزيع حد إجمالي أعلى: تُطابق فوائض الأدوار مع فجواتها لكل مهارة، دون التوصية بأشخاص أو تحركات فردية.",
+                    "يُعامل كل سجل كمهارة واحدة لكل صف؛ وتُطابق التسميات بعد إزالة المسافات وتجاهل حالة الأحرف.",
+                    *(
+                        ["حُجبت تفاصيل الأدوار والمهارات أو الإجماليات لأن مجموعة واحدة على الأقل تضم أقل من خمسة؛ ولا تُعاد سجلات على مستوى الأفراد."]
+                        if response["group_details_withheld"]
+                        else []
+                    ),
+                    *(
+                        ["الطلب غير معروف لعدم تحديد جدول للطلب؛ ولا تُحسب الفجوات أو إمكانية إعادة التوزيع."]
+                        if response["demand"]["status"] == "unknown"
+                        else []
+                    ),
+                ]
+            return response
+
+        try:
+            return await asyncio.to_thread(build)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            logger.exception("Data Hub workforce skills analysis failed for %s", filename)
+            raise HTTPException(status_code=422, detail="The selected data could not produce a valid skills comparison.")
 
     async def export_profiles(
         files: list[UploadFile],

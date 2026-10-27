@@ -19,7 +19,9 @@ from backend.core.data_hub_engine import (
     forecast_frame,
     profile_frame,
     workforce_scenario_frame,
+    workforce_skills_frame,
 )
+from backend.core.semantic_column_mapper import SemanticColumnMapper, SemanticRole
 
 
 class DataHubProfileTests(unittest.TestCase):
@@ -415,6 +417,132 @@ class WorkforceScenarioTests(unittest.TestCase):
             },
         )
         self.assertEqual(unauthorized.status_code, 401)
+
+
+class WorkforceSkillsTests(unittest.TestCase):
+    def setUp(self):
+        self.supply = pd.DataFrame({
+            "Role": ["Analyst"] * 9 + ["Engineer"] * 5,
+            "Skill": ["Python"] * 14,
+        })
+        self.demand = pd.DataFrame({
+            "Role": ["Analyst", "Engineer"],
+            "Skill": ["Python", "Python"],
+            "Required": [5, 10],
+        })
+
+    def build(self, supply=None, demand=True):
+        selected_demand = self.demand if demand is True else demand
+        return workforce_skills_frame(
+            supply if supply is not None else self.supply,
+            filename="skills.csv",
+            sheet="Inventory",
+            supply_role_column="Role",
+            supply_skill_column="Skill",
+            demand_frame=selected_demand,
+            demand_filename="demand.csv" if selected_demand is not None else None,
+            demand_sheet="Demand" if selected_demand is not None else None,
+            demand_role_column="Role" if selected_demand is not None else None,
+            demand_skill_column="Skill" if selected_demand is not None else None,
+            demand_count_column="Required" if selected_demand is not None else None,
+        )
+
+    def test_maps_supply_demand_coverage_and_aggregate_redeployment(self):
+        result = self.build()
+        self.assertEqual(result["demand"]["status"], "known")
+        self.assertEqual(result["totals"]["supply"], 14)
+        self.assertEqual(result["totals"]["demand"], 15)
+        self.assertEqual(result["totals"]["coverage_pct"], 93.3333)
+        self.assertEqual(result["totals"]["gap"], 5)
+        self.assertEqual(result["totals"]["surplus"], 4)
+        self.assertEqual(result["totals"]["redeployable_units"], 4)
+        self.assertEqual(len(result["groups"]), 2)
+        self.assertEqual(len(result["skill_groups"]), 1)
+        self.assertFalse(result["privacy"]["persisted"])
+        self.assertFalse(result["privacy"]["source_rows_returned"])
+        self.assertFalse(result["privacy"]["person_level_recommendations"])
+
+    def test_missing_demand_is_unknown_not_a_shortage(self):
+        result = self.build(demand=None)
+        self.assertEqual(result["demand"]["status"], "unknown")
+        self.assertIsNone(result["totals"]["demand"])
+        self.assertIsNone(result["totals"]["gap"])
+        self.assertIsNone(result["totals"]["coverage_pct"])
+        self.assertIsNone(result["totals"]["redeployable_units"])
+        self.assertEqual(result["groups"][0]["demand"], None)
+        self.assertTrue(any("Demand data is unknown" in item for item in result["limitations"]))
+
+    def test_small_role_skill_cohort_withholds_all_breakdowns_and_discloses_it(self):
+        supply = pd.DataFrame({
+            "Role": ["Analyst"] * 4 + ["Engineer"] * 6,
+            "Skill": ["Python"] * 10,
+        })
+        demand = pd.DataFrame({
+            "Role": ["Analyst", "Engineer"],
+            "Skill": ["Python", "Python"],
+            "Required": [5, 7],
+        })
+        result = self.build(supply=supply, demand=demand)
+        self.assertTrue(result["group_details_withheld"])
+        self.assertEqual(result["groups"], [])
+        self.assertEqual(result["skill_groups"], [])
+        self.assertTrue(any("below five" in item for item in result["limitations"]))
+        self.assertIsNone(result["totals"]["redeployable_units"])
+
+    def test_supply_count_column_is_explicit_and_numeric(self):
+        supply = self.supply.assign(FTE=[1] * 9 + [2] * 5)
+        result = workforce_skills_frame(
+            supply,
+            filename="skills.csv",
+            sheet="Inventory",
+            supply_role_column="Role",
+            supply_skill_column="Skill",
+            supply_count_column="FTE",
+            demand_frame=self.demand,
+            demand_role_column="Role",
+            demand_skill_column="Skill",
+            demand_count_column="Required",
+        )
+        self.assertEqual(result["totals"]["supply"], 19)
+        self.assertEqual(result["supply_mapping"]["count_basis"], "mapped_column")
+
+    def test_skill_and_role_names_have_explicit_semantic_roles(self):
+        mapped = SemanticColumnMapper().map(pd.DataFrame({
+            "Job Title": ["Analyst"],
+            "Skill Competency": ["Python"],
+        }))
+        self.assertEqual(mapped.columns["Job Title"].role, SemanticRole.WORKFORCE_ROLE)
+        self.assertEqual(mapped.columns["Skill Competency"].role, SemanticRole.SKILL)
+
+    def test_skills_endpoint_returns_only_aggregates(self):
+        router = create_data_hub_router()
+        app = FastAPI()
+        app.dependency_overrides[router.dependencies[0].dependency] = lambda: None
+        app.include_router(router)
+        client = TestClient(app)
+        supply_csv = ("Role,Skill\n" + "Analyst,Python\n" * 9 + "Engineer,Python\n" * 5).encode()
+        demand_csv = b"Role,Skill,Required\nAnalyst,Python,5\nEngineer,Python,10\n"
+        response = client.post(
+            "/api/local/data-hub/skills",
+            files={
+                "file": ("skills.csv", supply_csv, "text/csv"),
+                "demand_file": ("demand.csv", demand_csv, "text/csv"),
+            },
+            data={
+                "sheet": "Data",
+                "supply_role_column": "Role",
+                "supply_skill_column": "Skill",
+                "demand_sheet": "Data",
+                "demand_role_column": "Role",
+                "demand_skill_column": "Skill",
+                "demand_count_column": "Required",
+                "language": "en",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["totals"]["redeployable_units"], 4)
+        self.assertNotIn("Analyst,Python", response.text)
 
 
 if __name__ == "__main__":
