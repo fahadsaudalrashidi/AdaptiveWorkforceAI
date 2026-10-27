@@ -1,11 +1,12 @@
 """
 AWI Benchmark Engine — Phase 29F (Real Implementation).
 
-Provides sector-level workforce benchmarking with:
+Provides the local illustrative benchmark examples, while the verified
+cross-organisation contribution programme remains closed:
   - SQLite-backed local benchmark database
   - Pre-seeded Saudi sector benchmarks (Banking, Oil & Gas, Telecom, Government)
-  - Contribution submission with k-anonymity gate (k≥5)
-  - Differential privacy noise injection (ε=0.5) on outputs
+  - Opt-in contribution/withdrawal flow is not enabled
+  - Seeded examples are never returned as observed sector results
   - Gap analysis: org vs sector average
   - Fully offline — zero external network calls
   - PDPL-compliant: only noised aggregates stored, no employee rows
@@ -14,7 +15,8 @@ Usage:
     from backend.core.benchmark_engine import BenchmarkEngine
     engine = BenchmarkEngine()
     result = engine.compare(org_data, sector='banking', employee_range='500-2000')
-    engine.submit_contribution(org_data, sector='banking', org_hash='abc123')
+    # Contributions remain disabled until the documented governance controls
+    # and validated aggregation/privacy accounting are implemented.
 """
 
 from __future__ import annotations
@@ -34,14 +36,16 @@ _DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "awi_benchma
 _K_MIN   = 5        # k-anonymity floor — must have ≥5 contributors before publication
 _DP_EPS  = 0.5      # differential privacy ε parameter
 _DP_DELTA = 1e-5    # differential privacy δ parameter
+_CONTRIBUTION_PROGRAM_OPEN = False
+
+
+class BenchmarkContributionsDisabled(RuntimeError):
+    """Raised while the real-data contribution programme is not governance-ready."""
 
 # ── Saudi sector seed data ────────────────────────────────────────────────────
-# Realistic baseline benchmarks seeded for Phase 29.
-# These represent estimated Saudi market averages derived from:
-#   - Public Vision 2030 workforce reports
-#   - Saudi Labour Market data (HRSD)
-#   - Global HR analytics benchmarks adapted for Saudi context
-# All values are disclosed as "seeded estimates" until k≥5 client contributions exist.
+# Internal synthetic examples only. These values are not sourced from observed
+# Saudi industry/client data. They are retained for local development fixtures
+# and must never be exposed through the verified benchmark API.
 
 _SEED_BENCHMARKS = [
     {
@@ -311,17 +315,26 @@ def _gap_significance(gap_pct: float, direction: str) -> str:
 
 class BenchmarkEngine:
     """
-    AWI Benchmark Engine.
-    Thread-safe via per-call connections. Fully offline.
+    AWI illustrative benchmark store.
+
+    Real cross-organisation benchmarking is fail-closed until its consent,
+    withdrawal, tenant-isolation, retention, aggregation, privacy-accounting,
+    release-validation and audit controls are implemented.
     """
 
     def get_available_sectors(self) -> list[dict]:
-        """Return list of sectors with benchmark data available."""
+        """Return only sectors with verified, approved releases.
+
+        There is no approved release pipeline yet, so seeded rows are excluded
+        regardless of their placeholder contributor counts.
+        """
+        if not _CONTRIBUTION_PROGRAM_OPEN:
+            return []
         conn = _ensure_db()
         try:
             rows = conn.execute(
                 "SELECT DISTINCT sector, n_contributors, employee_range FROM sector_benchmarks "
-                "WHERE n_contributors >= ? ORDER BY sector",
+                "WHERE is_seeded=0 AND n_contributors >= ? ORDER BY sector",
                 (_K_MIN,)
             ).fetchall()
             return [
@@ -340,21 +353,26 @@ class BenchmarkEngine:
     def get_benchmark(self, sector: str, employee_range: str = "500-2000",
                       period: str = "Q2_2026") -> BenchmarkRecord | None:
         """
-        Retrieve sector benchmark. Returns None if k-anonymity gate not met.
-        Applies differential privacy noise to all output values.
+        Retrieve a verified sector benchmark.
+
+        The service is intentionally closed until a validated release pipeline
+        exists; a seeded row or a placeholder contributor count is not enough.
         """
+        if not _CONTRIBUTION_PROGRAM_OPEN:
+            return None
         conn = _ensure_db()
         try:
             row = conn.execute(
                 "SELECT * FROM sector_benchmarks "
-                "WHERE sector=? AND employee_range=? AND period=? AND n_contributors>=?",
+                "WHERE sector=? AND employee_range=? AND period=? "
+                "AND is_seeded=0 AND n_contributors>=?",
                 (sector, employee_range, period, _K_MIN)
             ).fetchone()
             if row is None:
                 # Try any period
                 row = conn.execute(
-                    "SELECT * FROM sector_benchmarks WHERE sector=? AND n_contributors>=? "
-                    "ORDER BY published_at DESC LIMIT 1",
+                    "SELECT * FROM sector_benchmarks WHERE sector=? AND is_seeded=0 "
+                    "AND n_contributors>=? ORDER BY published_at DESC LIMIT 1",
                     (sector, _K_MIN)
                 ).fetchone()
             if row is None:
@@ -553,14 +571,18 @@ class BenchmarkEngine:
         consent_version: str = "1.0",
         period: str = "Q2_2026",
     ) -> dict:
-        """
-        Submit anonymised aggregate contribution to sector benchmark pool.
+        """Submit an explicitly opted-in organisation contribution.
 
-        Privacy guarantees:
-        - org_identifier is one-way hashed (SHA-256) before storage
-        - Only noised aggregate metrics stored — no individual employee data
-        - Contribution recorded but benchmark only published once k≥5 contributions
+        This currently always fails closed. Hashing an identifier and adding
+        noise are not substitutes for validated consent, tenant isolation,
+        aggregation, privacy accounting, withdrawal and audit controls.
         """
+        if not _CONTRIBUTION_PROGRAM_OPEN:
+            raise BenchmarkContributionsDisabled(
+                "Benchmark contributions are not being accepted. "
+                "The opt-in programme is not open."
+            )
+
         n_emp = int(org_data.get("total_employee_records", 0))
         if employee_range is None:
             employee_range = _classify_range(n_emp)

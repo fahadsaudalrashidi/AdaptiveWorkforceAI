@@ -233,3 +233,55 @@ def test_authentication_and_role_checks_are_enforced(api_client: dict) -> None:
         headers={"Authorization": f"Bearer {api_client['admin_token']}"},
     ).status_code == 200
 
+
+def test_benchmark_api_hides_seeded_examples_and_rejects_contributions(
+    api_client: dict,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from backend.core import benchmark_engine
+
+    monkeypatch.setattr(benchmark_engine, "_DB_PATH", tmp_path / "benchmarks.sqlite3")
+    client = api_client["client"]
+
+    assert client.get("/api/local/benchmarks/sectors").status_code == 401
+    assert client.post(
+        "/api/local/benchmarks/submit",
+        json={"org_data": {"total_employee_records": 10}, "sector": "banking"},
+    ).status_code == 401
+
+    sectors = client.get("/api/local/benchmarks/sectors", headers=admin_headers)
+    assert sectors.status_code == 200
+    assert sectors.json()["sectors"] == []
+
+    comparison = client.post(
+        "/api/local/benchmarks/compare",
+        headers=admin_headers,
+        json={
+            "org_data": {
+                "total_employee_records": 100,
+                "executive_indices": {"wsi": 75},
+            },
+            "sector": "banking",
+        },
+    )
+    assert comparison.status_code == 200
+    result = comparison.json()["comparison"]
+    assert result["available"] is False
+    assert result["benchmark"] is None
+    assert result["gaps"] == []
+
+    contribution = client.post(
+        "/api/local/benchmarks/submit",
+        headers=admin_headers,
+        json={
+            "org_data": {"total_employee_records": 100},
+            "sector": "banking",
+            "org_identifier": "caller-controlled-value",
+        },
+    )
+    assert contribution.status_code == 409
+    assert contribution.json()["submitted"] is False
+    assert "not being accepted" in contribution.json()["detail"]
+

@@ -34,7 +34,7 @@ interface BenchmarkComparison {
    * despite the displayed `n_contributors` count. Drives which disclosure
    * text renders below — never the "k-anonymity enforced" framing for
    * seeded data, since there's no real cross-org data to protect yet. */
-  benchmark?: { is_seeded?: boolean } | null
+  benchmark?: { is_seeded?: boolean; is_verified?: boolean } | null
   governance_note?: string
 }
 
@@ -112,7 +112,11 @@ export function BenchmarkGapPanel({ comparison, onRequestComparison }: Props) {
 
   const sectorLabel = comparison.sector_label || comparison.sector
   const gaps = comparison.gaps || []
-  const isSeeded = comparison.benchmark?.is_seeded !== false // default true: treat unknown as seeded, never overclaim
+  // Unseeded is not the same as verified. Until the backend's reviewed release
+  // path supplies an explicit approval flag, keep the display in illustrative
+  // mode and never frame a value as an observed sector result.
+  const isSeeded = comparison.benchmark?.is_seeded !== false
+    || comparison.benchmark?.is_verified !== true
 
   return (
     <div className="space-y-4">

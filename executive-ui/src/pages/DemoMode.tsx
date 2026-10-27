@@ -20,7 +20,11 @@ interface DemoStep {
   titleAr: string
   descEn: string
   descAr: string
-  component: React.FC<{ onNext: () => void; selectedCompany?: DemoCompanyProfile | null }>
+  component: React.FC<{
+    onNext: () => void
+    selectedCompany?: DemoCompanyProfile | null
+    onSelectCompany?: (company: DemoCompanyProfile) => void
+  }>
 }
 
 // ── Step components ────────────────────────────────────────────────────────────
@@ -42,8 +46,10 @@ function StepLanding({ onNext }: { onNext: () => void; selectedCompany?: DemoCom
         </h2>
         <p className={`text-sm text-slate-500 dark:text-slate-400 max-w-lg mx-auto leading-relaxed ${isAr ? 'text-right' : ''}`}>
           {t(
-            'Explore a guided preview of the analytics-to-report workflow using fictional Saudi enterprise examples. All figures are static and synthetic.',
-            'استكشف معاينة توجيهية لسير التحليلات والتقارير باستخدام أمثلة مؤسسية سعودية افتراضية. جميع الأرقام ثابتة واصطناعية.'
+            'Explore a guided product preview with fictional Saudi enterprise scenarios. ' +
+            'Every displayed value is fixed synthetic sample content; no file is uploaded or analyzed.',
+            'استكشف معاينة توجيهية لسيناريوهات مؤسسية سعودية خيالية. ' +
+            'جميع القيم المعروضة اصطناعية وثابتة؛ لا يتم تحميل أي ملف أو تحليله.'
           )}
         </p>
       </div>
@@ -70,9 +76,11 @@ function StepLanding({ onNext }: { onNext: () => void; selectedCompany?: DemoCom
 function StepUpload({
   onNext,
   selectedCompany,
+  onSelectCompany,
 }: {
   onNext: () => void
   selectedCompany?: DemoCompanyProfile | null
+  onSelectCompany?: (company: DemoCompanyProfile) => void
 }) {
   const { t, isAr } = useLanguage()
   const [chosen, setChosen] = useState<DemoCompanyProfile | null>(selectedCompany ?? null)
@@ -102,7 +110,10 @@ function StepUpload({
             key={profile.company_id}
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
-            onClick={() => setChosen(profile)}
+            onClick={() => {
+              setChosen(profile)
+              onSelectCompany?.(profile)
+            }}
             className={`card p-4 text-left transition-all ${
               chosen?.company_id === profile.company_id
                 ? 'ring-2 ring-blue-500 border-blue-300 dark:border-blue-700'
@@ -177,11 +188,11 @@ function StepGovernance({ onNext }: { onNext: () => void; selectedCompany?: Demo
       <div className="p-4 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl text-center">
         <ShieldCheck size={28} className="text-slate-500 mx-auto mb-2" />
         <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
-          {t('Illustrative sample status — not a live scan', 'حالة توضيحية — ليست نتيجة فحص فعلي')}
+          {t('Illustrative sample status — no live scan was performed', 'حالة توضيحية — لم يُجرَ فحص فعلي')}
         </p>
       </div>
       <button onClick={onNext} className="btn-primary flex items-center gap-2">
-        {t('Proceed to Analysis', 'المتابعة للتحليل')} <ChevronRight size={16} />
+        {t('Continue the sample tour', 'متابعة الجولة التوضيحية')} <ChevronRight size={16} />
       </button>
     </motion.div>
   )
@@ -202,8 +213,8 @@ function StepSchema({ onNext }: { onNext: () => void; selectedCompany?: DemoComp
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
       <p className={`text-sm text-slate-600 dark:text-slate-400 ${isAr ? 'text-right' : ''}`}>
         {t(
-          '35 columns identified and mapped to HR theory constructs.',
-          '35 عموداً تم تحديدها ورسمها لبنى النظرية البشرية.'
+          'Scripted sample: 35 illustrative columns are shown mapped to HR theory constructs.',
+          'عينة مكتوبة مسبقاً: تظهر 35 خانة توضيحية مرتبطة ببنى نظرية الموارد البشرية.'
         )}
       </p>
       <div className="card overflow-hidden">
@@ -243,22 +254,33 @@ function StepSchema({ onNext }: { onNext: () => void; selectedCompany?: DemoComp
   )
 }
 
-function StepDashboard({ onNext }: { onNext: () => void; selectedCompany?: DemoCompanyProfile | null }) {
+function StepDashboard({
+  onNext,
+  selectedCompany,
+}: {
+  onNext: () => void
+  selectedCompany?: DemoCompanyProfile | null
+}) {
   const { t } = useLanguage()
+  const totalEmployees = selectedCompany?.employee_count ?? 3247
+  const stableCount = Math.round(totalEmployees * 0.569)
+  const monitoringCount = Math.round(totalEmployees * 0.275)
+  const concernCount = Math.round(totalEmployees * 0.118)
+  const priorityCount = totalEmployees - stableCount - monitoringCount - concernCount
   const bands = [
-    { label: t('Stable', 'مستقر'), count: 1847, color: 'bg-emerald-500', pct: '56.9%' },
-    { label: t('Monitoring', 'مراقبة'), count: 892, color: 'bg-amber-500', pct: '27.5%' },
-    { label: t('Strategic Concern', 'قلق استراتيجي'), count: 384, color: 'bg-orange-500', pct: '11.8%' },
-    { label: t('Priority Review', 'مراجعة عاجلة'), count: 124, color: 'bg-red-500', pct: '3.8%' },
+    { label: t('Stable', 'مستقر'), count: stableCount, color: 'bg-emerald-500', pct: '56.9%' },
+    { label: t('Monitoring', 'مراقبة'), count: monitoringCount, color: 'bg-amber-500', pct: '27.5%' },
+    { label: t('Strategic Concern', 'قلق استراتيجي'), count: concernCount, color: 'bg-orange-500', pct: '11.8%' },
+    { label: t('Priority Review', 'مراجعة عاجلة'), count: priorityCount, color: 'bg-red-500', pct: '3.8%' },
   ]
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: t('Total Employees', 'إجمالي الموظفين'), value: '3,247', color: 'text-slate-800 dark:text-slate-200' },
+          { label: t('Total Employees', 'إجمالي الموظفين'), value: totalEmployees.toLocaleString(), color: 'text-slate-800 dark:text-slate-200' },
           { label: t('Stability Index', 'مؤشر الاستقرار'), value: '72.4', color: 'text-blue-600 dark:text-blue-400' },
           { label: t('Stable Workforce', 'القوى العاملة المستقرة'), value: '56.9%', color: 'text-emerald-600 dark:text-emerald-400' },
-          { label: t('Priority Review', 'مراجعة عاجلة'), value: '124', color: 'text-red-600 dark:text-red-400' },
+          { label: t('Priority Review', 'مراجعة عاجلة'), value: priorityCount.toLocaleString(), color: 'text-red-600 dark:text-red-400' },
         ].map(kpi => (
           <div key={kpi.label} className="card p-4 text-center">
             <p className={`text-2xl font-black ${kpi.color}`}>{kpi.value}</p>
@@ -432,8 +454,17 @@ function StepCalibration({ onNext }: { onNext: () => void; selectedCompany?: Dem
   )
 }
 
-function StepSummary({ onNext }: { onNext: () => void; selectedCompany?: DemoCompanyProfile | null }) {
+function StepSummary({
+  onNext,
+  selectedCompany,
+}: {
+  onNext: () => void
+  selectedCompany?: DemoCompanyProfile | null
+}) {
   const { t, isAr } = useLanguage()
+  const selectedName = selectedCompany
+    ? (isAr ? selectedCompany.name_ar : selectedCompany.name_en)
+    : t('the selected synthetic company', 'الشركة الاصطناعية المختارة')
   const insights = [
     t('Engineering department shows sustained concern indicators — structured assessment warranted within 90 days.', 'يُظهر قسم الهندسة مؤشرات قلق متواصلة — يستدعي إجراء تقييم منظم خلال 90 يوماً.'),
     t('Operations workforce has elevated demand-resource imbalance per JD-R proxy signals — workload review recommended.', 'يعاني فريق العمليات من اختلال في توازن الطلب-الموارد وفق إشارات JD-R الوكيلة — يُوصى بمراجعة عبء العمل.'),
@@ -447,12 +478,11 @@ function StepSummary({ onNext }: { onNext: () => void; selectedCompany?: DemoCom
         </p>
         <p className={`text-sm text-slate-600 dark:text-slate-400 leading-relaxed ${isAr ? 'text-right' : ''}`}>
           {t(
-            'National Industrial Holdings demonstrates a stable workforce foundation with 56.9% of employees ' +
-            'in the Stable risk band. The Engineering department requires structured attention. ' +
-            'Compensation equity indicators (Adams proxy) are within acceptable range organisation-wide.',
-            'تُظهر الشركة الوطنية للصناعة القابضة أساساً متيناً للقوى العاملة مع 56.9% من الموظفين ' +
-            'في نطاق المخاطر المستقر. يتطلب قسم الهندسة اهتماماً منظماً. ' +
-            'مؤشرات عدالة التعويض (Adams proxy) ضمن النطاق المقبول على مستوى المؤسسة.'
+            'Synthetic sample for ',
+            'عينة اصطناعية لـ '
+          )}{selectedName}{t(
+            ' uses fixed illustrative values, including a 56.9% Stable band and a sample Engineering review note. These are not measured employee outcomes.',
+            ' تستخدم قيماً توضيحية ثابتة، بما فيها نسبة استقرار 56.9% وملاحظة مراجعة تجريبية لقسم الهندسة. هذه ليست نتائج مقاسة للموظفين.'
           )}
         </p>
       </div>
@@ -478,7 +508,7 @@ function StepSummary({ onNext }: { onNext: () => void; selectedCompany?: DemoCom
         ))}
       </div>
       <button onClick={onNext} className="btn-primary flex items-center gap-2">
-        {t('Export PDF Report', 'تصدير تقرير PDF')} <ChevronRight size={16} />
+        {t('View sample report', 'عرض التقرير التوضيحي')} <ChevronRight size={16} />
       </button>
     </motion.div>
   )
@@ -515,7 +545,7 @@ function StepExport({ onNext }: { onNext: () => void; selectedCompany?: DemoComp
           className="btn-primary flex items-center gap-2"
         >
           <Download size={16} />
-          {t('Export Executive PDF (Demo)', 'تصدير PDF التنفيذي (عرض تجريبي)')}
+          {t('Print this synthetic sample', 'طباعة هذه العينة الاصطناعية')}
         </button>
       ) : (
         <motion.div
@@ -525,7 +555,7 @@ function StepExport({ onNext }: { onNext: () => void; selectedCompany?: DemoComp
         >
           <CheckCircle2 size={20} className="text-emerald-500" />
           <p className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
-            {t('Export initiated — mandatory disclaimers included', 'بدأ التصدير — تم تضمين إخلاء المسؤولية الإلزامي')}
+            {t('Browser print dialog opened. No report was generated or stored.', 'تم فتح نافذة الطباعة. لم يتم إنشاء تقرير أو تخزينه.')}
           </p>
         </motion.div>
       )}
@@ -533,10 +563,10 @@ function StepExport({ onNext }: { onNext: () => void; selectedCompany?: DemoComp
       <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-lg">
         <p className={`text-xs text-slate-500 dark:text-slate-400 leading-relaxed ${isAr ? 'text-right' : ''}`}>
           {t(
-            'All PDF exports include 3 mandatory disclaimers: probabilistic analysis only, ' +
-            'governance controls active, and offline deployment mode.',
-            'تتضمن جميع صادرات PDF 3 إخلاءات مسؤولية إلزامية: التحليل الاحتمالي فقط، ' +
-            'وضوابط الحوكمة النشطة، ووضع النشر دون اتصال.'
+            'This action opens your browser print dialog for the visible synthetic sample only. ' +
+            'It does not create a company report.',
+            'يفتح هذا الإجراء نافذة الطباعة في المتصفح للعينة الاصطناعية الظاهرة فقط. ' +
+            'ولا ينشئ تقريراً للشركة.'
           )}
         </p>
       </div>
@@ -565,12 +595,10 @@ function StepComplete({ onNext }: { onNext: () => void; selectedCompany?: DemoCo
         </h2>
         <p className={`text-sm text-slate-500 dark:text-slate-400 max-w-lg mx-auto leading-relaxed ${isAr ? 'text-right' : ''}`}>
           {t(
-            'You have seen the complete upload-to-report workflow: governance scanning, ' +
-            'dataset classification, theory-grounded analysis, calibrated risk scoring, ' +
-            'and compliant PDF export.',
-            'لقد اطلعتم على سير العمل الكامل من التحميل إلى التقرير: فحص الحوكمة، ' +
-            'وتصنيف مجموعة البيانات، والتحليل المبني على النظرية، وتسجيل المخاطر المعاير، ' +
-            'وتصدير PDF المتوافق.'
+            'You have completed a guided tour of fixed synthetic examples. No dataset was uploaded, ' +
+            'no live analysis ran, and no observed sector benchmark is shown.',
+            'أكملت جولة توضيحية بقيم اصطناعية ثابتة. لم يتم تحميل أي مجموعة بيانات، ' +
+            'ولم يُجرَ تحليل مباشر، ولا تظهر أي معايير قطاعية مرصودة.'
           )}
         </p>
       </div>
@@ -643,8 +671,8 @@ const DEMO_STEPS: DemoStep[] = [
   },
   {
     id: 9, icon: Download,
-    titleEn: 'PDF Export',       titleAr: 'تصدير PDF',
-    descEn: 'Report generation', descAr: 'إنشاء التقارير',
+    titleEn: 'Print Sample',     titleAr: 'طباعة العينة',
+    descEn: 'Browser print',     descAr: 'طباعة المتصفح',
     component: StepExport,
   },
   {
@@ -693,8 +721,8 @@ export function DemoMode() {
         </div>
         <p className={`text-sm text-slate-500 dark:text-slate-400 ${isAr ? 'text-right' : ''}`}>
           {t(
-            'Guided preview — synthetic Saudi enterprise data only',
-            'معاينة توجيهية — بيانات مؤسسية سعودية اصطناعية فقط'
+            'Guided 11-step tour — synthetic sample data only',
+            'جولة إرشادية من 11 خطوة — بيانات اصطناعية فقط'
           )}
         </p>
       </motion.div>
@@ -762,6 +790,7 @@ export function DemoMode() {
             <StepComponent
               onNext={handleNext}
               selectedCompany={selectedCompany}
+              onSelectCompany={setSelectedCompany}
             />
           </motion.div>
         </AnimatePresence>

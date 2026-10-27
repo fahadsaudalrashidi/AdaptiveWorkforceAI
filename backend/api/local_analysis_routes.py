@@ -3960,13 +3960,11 @@ def create_local_analysis_router() -> Any:
 
     @router.get("/benchmarks/sectors")
     async def benchmark_sectors():
-        """List available sectors (those with n_contributors>=k-anonymity floor
-        in the local benchmark DB). Phase 16 honesty note: every sector
-        currently in the DB is a seeded placeholder (see benchmark_engine.py's
-        `_SEED_BENCHMARKS` and `BenchmarkRecord.is_seeded`) — the k-anonymity
-        gate and DP noise are real, executable code, but they are not yet
-        protecting real cross-organisation data. Callers must check
-        `is_seeded` before presenting a comparison as a validated benchmark."""
+        """List sectors with an approved, verified release.
+
+        The contribution programme is closed, so seeded illustrative rows are
+        never listed as observed sector results.
+        """
         try:
             from backend.core.benchmark_engine import get_benchmark_engine
             engine = get_benchmark_engine()
@@ -4003,12 +4001,16 @@ def create_local_analysis_router() -> Any:
     )
     async def benchmark_submit(payload: dict[str, Any]):
         """
-        Submit anonymised org data to improve sector benchmarks (k-anonymity enforced).
+        Benchmark contributions are intentionally unavailable until the opt-in
+        governance and validated aggregation pipeline is implemented.
 
         Payload: { org_data: {...}, sector: str, employee_range: str, org_identifier: str }
         """
         try:
-            from backend.core.benchmark_engine import get_benchmark_engine
+            from backend.core.benchmark_engine import (
+                BenchmarkContributionsDisabled,
+                get_benchmark_engine,
+            )
             engine = get_benchmark_engine()
             org_data   = payload.get("org_data") or {}
             sector     = str(payload.get("sector") or "banking")
@@ -4018,6 +4020,11 @@ def create_local_analysis_router() -> Any:
                                                 employee_range=emp_range,
                                                 org_identifier=identifier)
             return JSONResponse(result)
+        except BenchmarkContributionsDisabled as exc:
+            return JSONResponse(
+                status_code=409,
+                content={"submitted": False, "detail": str(exc)},
+            )
         except Exception as exc:
             logger.warning("Benchmark submit failed: %s", exc)
             return JSONResponse(status_code=500, content={"success": False, "detail": str(exc)})

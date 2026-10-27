@@ -1,9 +1,7 @@
 import { useState, Suspense, lazy } from 'react'
-import { Languages } from 'lucide-react'
 import { ThemeProvider } from './context/ThemeContext'
-import { LanguageProvider, useLanguage } from './context/LanguageContext'
+import { LanguageProvider } from './context/LanguageContext'
 import { AppLayout } from './layout/AppLayout'
-import { BrandLogo } from './layout/BrandLogo'
 import { PageErrorBoundary } from './components/shared/PageErrorBoundary'
 import { EnterpriseOverview } from './pages/EnterpriseOverview'
 import { TrustPanel } from './pages/TrustPanel'
@@ -30,7 +28,7 @@ import { ZakatEstimator } from './pages/ZakatEstimator'
 import type { NavPage } from './types'
 import { AuthGate } from './auth/AuthGate'
 import type { AuthUser } from './auth/authClient'
-import { DemoMode } from './pages/DemoMode'
+import { PublicDemoPage } from './public-demo/PublicDemoPage'
 
 // These substantial analytical screens load only when opened. The existing
 // Suspense/PageLoader boundary handles loading and the page boundary errors.
@@ -137,51 +135,11 @@ export default function App() {
 
 function AppRoute() {
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
-  if (path === '/demo') return <PublicDemo />
+  if (path === '/demo' || path.startsWith('/demo/')) return <PublicDemoPage />
 
   return (
     <AuthGate>
       {({ user, signOut }) => <AppContent user={user} onSignOut={signOut} />}
     </AuthGate>
-  )
-}
-
-function PublicDemo() {
-  const { t, lang, toggleLang } = useLanguage()
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <header className="border-b border-slate-200 bg-white/90 dark:border-slate-800 dark:bg-slate-900/90">
-        <div className="mx-auto flex max-w-screen-2xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-          <BrandLogo className="h-9 w-[165px] sm:w-[190px]" />
-          <div className="flex items-center gap-2">
-            <span className="hidden rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 sm:inline-flex">
-              {t('Synthetic-data demo', 'عرض ببيانات اصطناعية')}
-            </span>
-            <button
-              type="button"
-              onClick={toggleLang}
-              aria-label={t('Switch language', 'تغيير اللغة')}
-              className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-            >
-              <Languages size={16} />
-              {lang === 'en' ? 'عربي' : 'EN'}
-            </button>
-            <a href="/" className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
-              {t('Sign in', 'تسجيل الدخول')}
-            </a>
-          </div>
-        </div>
-      </header>
-      <main className="mx-auto max-w-screen-2xl px-4 py-6 sm:px-6 md:py-8">
-        <div role="note" className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
-          {t(
-            'Preview only: this guided experience uses fixed synthetic figures. It does not accept real uploads or access company datasets.',
-            'معاينة فقط: يستخدم هذا العرض أرقاماً اصطناعية ثابتة. لا يقبل ملفات حقيقية ولا يصل إلى بيانات الشركة.'
-          )}
-        </div>
-        <DemoMode />
-      </main>
-    </div>
   )
 }

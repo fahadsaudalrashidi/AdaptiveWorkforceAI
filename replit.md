@@ -91,6 +91,14 @@ or provision accounts. Replit reconciles and restarts workflows afterward.
   retain their authentication and first-password-change checks. Unknown API
   paths remain JSON 404s, not frontend HTML. The app shell and API responses
   are not cached; fingerprinted JS/CSS assets may be cached.
+- `/demo` is a public, read-only walkthrough using fixed synthetic local
+  examples. It does not call analysis APIs, accept uploads, or save changes.
+  Keep real organization data, uploads, and analysis behind the existing
+  authentication and authorization checks.
+- Sector benchmark contribution remains closed. Seeded sector examples are
+  not observed results; see `docs/BENCHMARK_CONTRIBUTION_GOVERNANCE.md` for the
+  consent, withdrawal, aggregation, privacy, retention, and audit gates that
+  must be implemented before accepting real contributions.
 - Regression checks:
   `AWI_TEST_POSTGRES=1 python -m unittest discover -s backend/tests`
   uses disposable schemas in the **development** PostgreSQL database.
