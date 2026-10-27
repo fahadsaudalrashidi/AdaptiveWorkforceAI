@@ -137,13 +137,23 @@ export function BenchmarkGapPanel({ comparison, onRequestComparison }: Props) {
         )}
       </div>
 
+      {isSeeded && (
+        <p role="note" className="rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100">
+          <strong>{t('Illustrative data—not a real sector benchmark.', 'بيانات إرشادية وليست معياراً قطاعياً حقيقياً.')}</strong>{' '}
+          {t(
+            'These are internal seeded values, not client contributions or observed sector results. Do not cite them as industry evidence or use them to make workforce decisions.',
+            'هذه قيم داخلية نموذجية وليست مساهمات من العملاء أو نتائج قطاعية مرصودة. لا تستشهد بها كدليل على القطاع أو تستخدمها لاتخاذ قرارات تخص القوى العاملة.'
+          )}
+        </p>
+      )}
+
       {/* Gap bars */}
       <div className="space-y-3">
         {gaps.map((gap, idx) => {
           const maxVal = Math.max(gap.org_value, gap.sector_mean, 1)
           const orgPct  = (gap.org_value  / maxVal) * 100
           const secPct  = (gap.sector_mean / maxVal) * 100
-          const color   = sigColor(gap.significance)
+          const color   = isSeeded ? '#94a3b8' : sigColor(gap.significance)
           const label   = isAr && gap.label_ar ? gap.label_ar : gap.label_en
 
           return (
@@ -151,7 +161,7 @@ export function BenchmarkGapPanel({ comparison, onRequestComparison }: Props) {
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium text-slate-300">{label}</span>
                 <span className="text-xs font-semibold" style={{ color }}>
-                  {sigLabel(gap.significance, isAr)}
+                  {isSeeded ? t('Illustrative difference', 'فرق إرشادي') : sigLabel(gap.significance, isAr)}
                 </span>
               </div>
               {/* Org bar */}
@@ -172,7 +182,7 @@ export function BenchmarkGapPanel({ comparison, onRequestComparison }: Props) {
               {/* Sector bar */}
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500 w-16 text-right shrink-0">
-                  {t('Sector', 'القطاع')}
+                  {isSeeded ? t('Reference', 'المرجع') : t('Sector', 'القطاع')}
                 </span>
                 <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
                   <div
@@ -195,17 +205,14 @@ export function BenchmarkGapPanel({ comparison, onRequestComparison }: Props) {
         </p>
       )}
 
-      <p className="text-xs text-slate-500 italic pt-1">
-        {isSeeded
-          ? t(
-              'This sector reference is this platform\'s own internal illustrative estimate — not yet backed by real client contributions. Differential-privacy noise and k-anonymity gating are real safeguards that will apply once genuine organisations contribute, but they currently protect a seeded placeholder, not real cross-organisation data. Treat as directional only.',
-              'هذا المرجع القطاعي تقدير إرشادي داخلي من هذه المنصة — وليس مدعوماً بعد بمساهمات فعلية من عملاء حقيقيين. ضوضاء الخصوصية التفاضلية وإخفاء الهوية آليات حماية فعلية ستُطبَّق فور مساهمة منظمات حقيقية، لكنها حالياً تحمي بيانات نموذجية وليست بيانات حقيقية عبر المنظمات. يُعامل كمؤشر اتجاهي فقط.'
-            )
-          : t(
-              'Benchmark values include differential privacy noise (ε=0.5). k-anonymity ≥5 enforced. Statistical comparison only.',
-              'قيم المعيار تتضمن ضوضاء الخصوصية التفاضلية (ε=0.5). يُطبّق مبدأ إخفاء الهوية k≥5. مقارنة إحصائية فقط.'
-            )}
-      </p>
+      {!isSeeded && (
+        <p className="text-xs text-slate-500 italic pt-1">
+          {t(
+            'Benchmark values include differential privacy noise (ε=0.5). k-anonymity ≥5 enforced. Statistical comparison only.',
+            'قيم المعيار تتضمن ضوضاء الخصوصية التفاضلية (ε=0.5). يُطبّق مبدأ إخفاء الهوية k≥5. مقارنة إحصائية فقط.'
+          )}
+        </p>
+      )}
     </div>
   )
 }

@@ -206,7 +206,7 @@ export function WorkforceScenarioStudio({
     setOvertimeColumn(nextNumeric.find((column) => /overtime|over.?time|extra.?hours|عمل.?إضافي/i.test(column.name))?.name ?? '')
     setResult(null)
     setError('')
-  }, [selectedDataset?.id])
+  }, [selectedDataset])
 
   useEffect(() => { setResult(null) }, [cleaningOptions])
 

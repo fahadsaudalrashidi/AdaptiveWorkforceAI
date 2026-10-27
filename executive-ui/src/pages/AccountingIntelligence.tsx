@@ -304,6 +304,7 @@ function NarrativeCard({ en, ar, isAr }: { en: string; ar: string; isAr: boolean
 // ── 1. General Ledger ────────────────────────────────────────────────────
 
 function GeneralLedgerTab({ data, t, isAr }: { data: GeneralLedgerData; t: T; isAr: boolean }) {
+  const [hoveredAccount, setHoveredAccount] = useState<string | null>(null)
   if (!data.available) {
     return (
       <EmptyState
@@ -316,7 +317,6 @@ function GeneralLedgerTab({ data, t, isAr }: { data: GeneralLedgerData; t: T; is
       />
     )
   }
-  const [hoveredAccount, setHoveredAccount] = useState<string | null>(null)
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-3 gap-5">

@@ -385,6 +385,12 @@ export function DataHub() {
               <div className="mt-3 text-2xl font-semibold tabular-nums text-white">{typeof metric.value === 'number' ? metric.value.toLocaleString('en-US') : metric.value}</div>
             </motion.div>)}
           </section>
+          <p role="note" className="px-1 text-[11px] leading-5 text-slate-500">
+            {t(
+              'Quality Index is an operational indicator based on missing cells and exact duplicates only. It does not certify semantic accuracy, source validity, or fitness for a decision.',
+              'مؤشر الجودة مقياس تشغيلي يعتمد فقط على الخلايا المفقودة والتكرارات التامة. ولا يُعد شهادة على الدقة الدلالية أو صحة المصدر أو ملاءمة البيانات لاتخاذ قرار.'
+            )}
+          </p>
 
           <section className={`${card} overflow-hidden`}>
             <div className="flex flex-col justify-between gap-3 border-b border-slate-700/70 p-4 sm:flex-row sm:items-center sm:px-5">

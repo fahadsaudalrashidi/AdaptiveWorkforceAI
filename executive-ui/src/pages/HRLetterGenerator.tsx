@@ -298,7 +298,7 @@ export function HRLetterGenerator() {
     } finally {
       setGenerating(null)
     }
-  }, [file, companyReady, selected, letterType, language, companyName, companyAddress, signatoryName, signatoryTitle])
+  }, [file, companyReady, selected, letterType, language, companyName, companyAddress, signatoryName, signatoryTitle, t])
 
   return (
     <div className="space-y-7">

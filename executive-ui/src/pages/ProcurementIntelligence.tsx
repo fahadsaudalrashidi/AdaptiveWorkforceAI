@@ -278,6 +278,7 @@ function NarrativeCard({ en, ar, isAr }: { en: string; ar: string; isAr: boolean
 // ── 1. Supplier Spend ────────────────────────────────────────────────────
 
 function SpendTab({ data, t, isAr }: { data: SupplierSpendData; t: T; isAr: boolean }) {
+  const [hoveredSupplier, setHoveredSupplier] = useState<string | null>(null)
   if (!data.available) {
     return (
       <EmptyState
@@ -290,7 +291,6 @@ function SpendTab({ data, t, isAr }: { data: SupplierSpendData; t: T; isAr: bool
       />
     )
   }
-  const [hoveredSupplier, setHoveredSupplier] = useState<string | null>(null)
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-3 gap-5">

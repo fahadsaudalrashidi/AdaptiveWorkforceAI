@@ -67,15 +67,16 @@ export async function readAnalysisStream<T>(
     if (event === 'result') result = payload as T
   }
   try {
-    while (true) {
-      const { value, done } = await reader.read()
-      buffer = (buffer + decoder.decode(value, { stream: !done })).replace(/\r\n/g, '\n')
+    let done = false
+    while (!done) {
+      const chunk = await reader.read()
+      done = chunk.done
+      buffer = (buffer + decoder.decode(chunk.value, { stream: !done })).replace(/\r\n/g, '\n')
       let boundary: number
       while ((boundary = buffer.indexOf('\n\n')) >= 0) {
         consume(buffer.slice(0, boundary))
         buffer = buffer.slice(boundary + 2)
       }
-      if (done) break
     }
     if (buffer.trim()) consume(buffer)
     if (!result) throw new Error('The connection ended before analysis finished. Please retry; no partial answer was accepted.')

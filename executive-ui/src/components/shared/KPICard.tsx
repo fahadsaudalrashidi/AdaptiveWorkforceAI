@@ -48,6 +48,15 @@ function AnimatedValue({ raw }: { raw: string }) {
   const numeric = parseFloat(numStr.replace(/,/g, ''))
   if (!Number.isFinite(numeric)) return <>{raw}</>
 
+  return <AnimatedNumber numeric={numeric} prefix={prefix} numStr={numStr} suffix={suffix} />
+}
+
+function AnimatedNumber({ numeric, prefix, numStr, suffix }: {
+  numeric: number
+  prefix: string
+  numStr: string
+  suffix: string
+}) {
   const decimals = numStr.includes('.') ? numStr.split('.')[1].length : 0
   const animated = useCountUp(numeric)
   const formatted = animated.toLocaleString(undefined, {
